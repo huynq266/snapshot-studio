@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Snap Studio</title>
+<!-- Mockup: fonts via CDN, same shortcut doc-guide's editor takes. For the packed
+     extension, self-host these — MV3's default CSP blocks remote fonts in production. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Playfair+Display:ital,wght@1,600&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="tokens.css">
+<link rel="stylesheet" href="editor.css">
+</head>
+<body>
+<div class="app">
+  <header class="topbar">
+    <div class="logo"><span class="mk"></span><span>Snap Studio <small>snap · annotate · export</small></span></div>
+    <div class="spacer"></div>
+    <label class="stamp-toggle"><input type="checkbox" id="stampToggle" checked> Context stamp</label>
+    <button id="copyImg" class="btn sm" title="Copy the annotated image">⧉ Copy image</button>
+    <button id="copyCtx" class="btn sm" title="Copy browser · OS · URL · time as text">⧉ Copy context</button>
+    <button id="downloadPng" class="btn primary" title="Export the annotated PNG">⬇ Export PNG</button>
+  </header>
+
+  <main class="body">
+    <aside class="palette-rail">
+      <h3>Components</h3>
+      <div class="palette" id="palette">
+        <button class="pal-btn" data-add="badge"><span class="ico"><span class="cmp-badge" style="width:28px;height:28px;font-size:12px">1</span></span>Step badge</button>
+        <button class="pal-btn" data-add="callout"><span class="ico">💬</span>Callout</button>
+        <button class="pal-btn" data-add="highlight"><span class="ico">⬚</span>Highlight</button>
+        <button class="pal-btn" data-add="pill"><span class="ico">🏷️</span>Pill label</button>
+        <button class="pal-btn" data-add="blur"><span class="ico">▒</span>Blur (redact)</button>
+        <button class="pal-btn" data-add="magnifier"><span class="ico">🔍</span>Magnifier</button>
+        <button class="pal-btn" data-add="arrow"><span class="ico">↗</span>Free arrow</button>
+      </div>
+      <p class="empty-hint">Click to drop a component in the middle of the shot, then drag it into place. <span class="kbd">⌫</span> deletes the selected one.</p>
+      <h3>Layers <span id="layerCount" class="kbd"></span></h3>
+      <div id="layers" class="layers-list"></div>
+    </aside>
+
+    <div class="stage-wrap" id="stageWrap">
+      <div class="stage-scaler" id="scaler">
+        <div class="stage" id="stage">
+          <img id="baseImg" alt="" />
+          <div class="canvas" id="canvas"></div>
+        </div>
+      </div>
+      <div id="dropHint" class="drop-hint">
+        <p><b>No capture yet.</b></p>
+        <p>Use the toolbar button (📸 whole tab, or ▭ region) on the page you want to document — it opens here automatically.</p>
+        <button id="uploadBtn" class="btn">Or upload an image…</button>
+      </div>
+      <div class="zoom-hud" id="zoomHud">
+        <button class="btn ghost sm" id="zoomOut">−</button>
+        <b id="zoomLbl">Fit</b>
+        <button class="btn ghost sm" id="zoomIn">+</button>
+        <button class="btn ghost sm" id="zoomFit">Fit</button>
+      </div>
+    </div>
+
+    <aside class="panel">
+      <h3 id="propsTitle">Properties</h3>
+      <div id="props"><p class="empty-hint">Select a component to edit it, or click one in the list above to add it.</p></div>
+    </aside>
+  </main>
+</div>
+<input type="file" id="fileInput" accept="image/*" hidden />
+<div class="toast" id="toast"></div>
+<script src="editor.js"></script>
+</body>
+</html>

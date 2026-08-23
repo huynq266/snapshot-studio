@@ -1,0 +1,26 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  body { width: 258px; margin: 0; font-family: 'Inter', system-ui, sans-serif; color: #17191e; padding: 14px; }
+  .row { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+  .mk { width: 22px; height: 22px; border-radius: 6px; background: linear-gradient(140deg, #a571f7, #7c2cfb); }
+  .t { font-weight: 700; font-size: 13px; letter-spacing: -.02em; }
+  .t small { display: block; font-family: ui-monospace, monospace; font-size: 8px; letter-spacing: .16em; text-transform: uppercase; color: #6415e1; margin-top: 1px; }
+  button { width: 100%; font-family: inherit; font-size: 13px; font-weight: 600; padding: 9px; border-radius: 9px; cursor: pointer; margin-bottom: 7px; border: 1px solid #dbdad6; background: #fff; }
+  button.primary { background: #7c2cfb; color: #fff; border-color: #7c2cfb; }
+  .hint { font-size: 11px; color: #7c818b; line-height: 1.45; margin: 4px 0 0; }
+  .kbd { font-family: ui-monospace, monospace; font-size: 10px; background: #f6f6f4; border: 1px solid #e8e7e4; border-radius: 4px; padding: 1px 4px; }
+</style>
+</head>
+<body>
+  <div class="row"><span class="mk"></span><span class="t">Snap Studio<small>snap · annotate · export</small></span></div>
+  <button class="primary" id="capture">📸 Snap visible tab</button>
+  <button id="captureRegion">▭ Snap a region…</button>
+  <button id="open">Open Snap Studio</button>
+  <p class="hint">Whole tab: <span class="kbd">Alt+Shift+S</span> · Region: <span class="kbd">Alt+Shift+R</span>. Opens the editor with the capture already dropped in — no project or job to set up first.</p>
+  <p class="hint" id="status" style="color:#6415e1;min-height:14px"></p>
+  <script src="popup.js"></script>
+</body>
+</html>

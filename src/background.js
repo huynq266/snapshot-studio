@@ -1,0 +1,160 @@
+/* Service worker: snap a tab (whole or a dragged region), then hand the image
+   to the editor tab. Forked from doc-guide's userGuideSnap background.js —
+   same "capture, stash, broadcast, focus" shape — plus a region-select path.
+
+   IMPORTANT: this file never touches image pixels. A service worker has no
+   DOM (no <canvas>, no Image()), so it cannot crop anything itself. It only
+   ever captures the FULL visible tab and relays it — cropping to a selected
+   region, or to the stage for export, happens in the editor tab, which has a
+   real DOM. See editor.js `cropDataUrl()`. */
+const SELF = chrome.runtime.getURL('');                 // chrome-extension://<id>/
+const EDITOR_URL = chrome.runtime.getURL('src/editor.html');
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// pages the browser forbids extensions from capturing
+const BLOCKED = /^(chrome|edge|brave|about|chrome-extension|moz-extension|devtools|view-source|data|blob):/i;
+function uncapturable(url) {
+  if (!url) return 'the current tab';
+  if (url.startsWith(SELF)) return 'the Snap Studio editor';
+  if (BLOCKED.test(url)) return 'a browser/system page';
+  if (/^https:\/\/(chromewebstore\.google\.com|chrome\.google\.com\/webstore)/.test(url)) return 'the Chrome Web Store';
+  if (url.startsWith('file://')) return 'a local file (enable “Allow access to file URLs” for this extension)';
+  return null;
+}
+const capturable = (url) => !uncapturable(url);
+
+// ---- remember the last normal tab the user was on (survives SW restarts) --
+let lastApp = null;
+chrome.storage.session.get('lastApp').then((r) => { if (r && r.lastApp) lastApp = r.lastApp; }).catch(() => {});
+function remember(tab) {
+  if (!tab || !capturable(tab.url)) return;
+  lastApp = { tabId: tab.id, windowId: tab.windowId };
+  chrome.storage.session.set({ lastApp }).catch(() => {});
+}
+chrome.tabs.onActivated.addListener(async ({ tabId }) => { try { remember(await chrome.tabs.get(tabId)); } catch (e) {} });
+chrome.tabs.onUpdated.addListener((_id, info, tab) => { if (info.status === 'complete' && tab.active) remember(tab); });
+
+async function resolveLastApp() {
+  if (!lastApp) { try { const r = await chrome.storage.session.get('lastApp'); if (r && r.lastApp) lastApp = r.lastApp; } catch (e) {} }
+  if (!lastApp) return null;
+  try { const t = await chrome.tabs.get(lastApp.tabId); if (capturable(t.url)) return { tabId: t.id, windowId: t.windowId }; } catch (e) {}
+  return null;
+}
+
+/** The tab to act on: the active tab if it's a normal page, else the last one we saw that was. */
+async function resolveTarget() {
+  let [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  if (tab && capturable(tab.url)) return { tab, error: null };
+  const cand = await resolveLastApp();
+  if (!cand) return { tab: null, error: `Can’t capture ${tab ? uncapturable(tab.url) : 'the current tab'}. Switch to your app’s tab, then Snap.` };
+  try { await chrome.tabs.update(cand.tabId, { active: true }); } catch (e) {}
+  try { await chrome.windows.update(cand.windowId, { focused: true }); } catch (e) {}
+  await wait(160); // let it paint before grabbing pixels / injecting the overlay
+  return { tab: await chrome.tabs.get(cand.tabId), error: null };
+}
+
+async function ensureEditor() {
+  const tabs = await chrome.tabs.query({});
+  const found = tabs.find((t) => t.url && t.url.startsWith(EDITOR_URL));
+  if (found) return { id: found.id, windowId: found.windowId };
+  const t = await chrome.tabs.create({ url: EDITOR_URL, active: false });
+  return { id: t.id, windowId: t.windowId };
+}
+
+async function focusEditor(editor) {
+  try { await chrome.tabs.update(editor.id, { active: true }); } catch (e) {}
+  if (editor.windowId != null) { try { await chrome.windows.update(editor.windowId, { focused: true }); } catch (e) {} }
+}
+
+/** Capture whatever tab/window is given right now (no target resolution — used for both
+ * the whole-tab snap, once a target tab is already active, and for export). */
+async function shootVisibleTab(windowId) {
+  return chrome.tabs.captureVisibleTab(windowId, { format: 'png' });
+}
+
+// ---- whole-tab snap --------------------------------------------------------
+async function captureWholeTab() {
+  const { tab, error } = await resolveTarget();
+  if (error) return { error };
+  let dataUrl;
+  try { dataUrl = await shootVisibleTab(tab.windowId); }
+  catch (e) { console.error('[snap-studio] captureVisibleTab failed:', e); return { error: String(e && e.message || e) }; }
+
+  const id = Date.now() + '-' + Math.random().toString(36).slice(2, 7);
+  await chrome.storage.local.set({ pendingCapture: dataUrl, captureId: id, captureUrl: tab.url || '', captureRect: null });
+  const editor = await ensureEditor();
+  chrome.runtime.sendMessage({ type: 'snap-capture', id, dataUrl, url: tab.url || '', rect: null }, () => void chrome.runtime.lastError);
+  await focusEditor(editor);
+  return { ok: true };
+}
+
+// ---- region snap ------------------------------------------------------------
+async function startRegionCapture() {
+  const { tab, error } = await resolveTarget();
+  if (error) return { error };
+  try {
+    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['src/region-select.js'] });
+  } catch (e) {
+    // Common cause: a page the browser allows *navigating* to but not *scripting* (e.g. a PDF viewer).
+    return { error: `Can’t draw a selection box on this page (${String(e && e.message || e)}). Try “Snap visible tab” instead.` };
+  }
+  regionTargetTab = { tabId: tab.id, windowId: tab.windowId };
+  return { ok: true };
+}
+
+let regionTargetTab = null;   // set by startRegionCapture, consumed by the region-selected handler below
+
+async function finishRegionCapture(rect, dpr) {
+  if (!regionTargetTab) return;
+  const { tabId, windowId } = regionTargetTab;
+  regionTargetTab = null;
+  let dataUrl;
+  try { dataUrl = await shootVisibleTab(windowId); }
+  catch (e) { console.error('[snap-studio] region captureVisibleTab failed:', e); return; }
+
+  const id = Date.now() + '-' + Math.random().toString(36).slice(2, 7);
+  const captureRect = { ...rect, dpr: dpr || 1 };
+  let url = '';
+  try { url = (await chrome.tabs.get(tabId)).url || ''; } catch (e) {}
+  await chrome.storage.local.set({ pendingCapture: dataUrl, captureId: id, captureUrl: url, captureRect });
+  const editor = await ensureEditor();
+  chrome.runtime.sendMessage({ type: 'snap-capture', id, dataUrl, url, rect: captureRect }, () => void chrome.runtime.lastError);
+  await focusEditor(editor);
+}
+
+// ---- triggers --------------------------------------------------------------
+chrome.commands.onCommand.addListener((cmd) => {
+  if (cmd === 'capture') captureWholeTab().catch((e) => console.warn('[snap-studio] capture error:', e));
+  if (cmd === 'capture-region') startRegionCapture().catch((e) => console.warn('[snap-studio] region-start error:', e));
+});
+
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (!msg || !msg.type) return;
+
+  if (msg.type === 'capture') {
+    captureWholeTab().then(sendResponse).catch((e) => sendResponse({ error: String(e && e.message || e) }));
+    return true;
+  }
+  if (msg.type === 'capture-region-start') {
+    startRegionCapture().then(sendResponse).catch((e) => sendResponse({ error: String(e && e.message || e) }));
+    return true;
+  }
+  if (msg.type === 'ugs-region-selected') {
+    finishRegionCapture(msg.rect, msg.dpr).catch((e) => console.warn('[snap-studio] finishRegionCapture error:', e));
+    return false;
+  }
+  if (msg.type === 'ugs-region-cancelled') {
+    regionTargetTab = null;
+    return false;
+  }
+  // The editor asks us to shoot ITS OWN tab in render mode — used for the final export,
+  // so the real Chromium compositor (not a canvas re-draw) is what produces the PNG. This
+  // is the one thing captureVisibleTab can do that no in-page canvas trick can: it rasterizes
+  // backdrop-filter glass correctly, because it's a real screenshot, not a DOM reconstruction.
+  if (msg.type === 'capture-for-export') {
+    const winId = sender.tab && sender.tab.windowId;
+    if (winId == null) { sendResponse({ error: 'no window id on sender tab' }); return false; }
+    shootVisibleTab(winId).then((dataUrl) => sendResponse({ dataUrl })).catch((e) => sendResponse({ error: String(e && e.message || e) }));
+    return true;
+  }
+});
