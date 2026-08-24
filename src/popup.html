@@ -2,16 +2,20 @@
 <html>
 <head>
 <meta charset="utf-8">
+<!-- Colours are hand-copied from tokens.css's foundations layer, not a <link> to it: this
+     popup is its own tiny document with no stage to size around, so pulling in the whole
+     kit for four hex values isn't worth the request. Keep these in sync by eye if the
+     brand pack's primary/neutral ramp ever moves. -->
 <style>
-  body { width: 258px; margin: 0; font-family: 'Inter', system-ui, sans-serif; color: #17191e; padding: 14px; }
+  body { width: 258px; margin: 0; font-family: 'Inter', system-ui, sans-serif; color: #14151a; padding: 14px; }
   .row { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
-  .mk { width: 22px; height: 22px; border-radius: 6px; background: linear-gradient(140deg, #a571f7, #7c2cfb); }
+  .mk { width: 22px; height: 22px; border-radius: 6px; background: linear-gradient(140deg, #4d7ceb, #1350de); }
   .t { font-weight: 700; font-size: 13px; letter-spacing: -.02em; }
-  .t small { display: block; font-family: ui-monospace, monospace; font-size: 8px; letter-spacing: .16em; text-transform: uppercase; color: #6415e1; margin-top: 1px; }
-  button { width: 100%; font-family: inherit; font-size: 13px; font-weight: 600; padding: 9px; border-radius: 9px; cursor: pointer; margin-bottom: 7px; border: 1px solid #dbdad6; background: #fff; }
-  button.primary { background: #7c2cfb; color: #fff; border-color: #7c2cfb; }
-  .hint { font-size: 11px; color: #7c818b; line-height: 1.45; margin: 4px 0 0; }
-  .kbd { font-family: ui-monospace, monospace; font-size: 10px; background: #f6f6f4; border: 1px solid #e8e7e4; border-radius: 4px; padding: 1px 4px; }
+  .t small { display: block; font-family: ui-monospace, monospace; font-size: 8px; letter-spacing: .16em; text-transform: uppercase; color: #0c3491; margin-top: 1px; }
+  button { width: 100%; font-family: inherit; font-size: 13px; font-weight: 600; padding: 9px; border-radius: 9px; cursor: pointer; margin-bottom: 7px; border: 1px solid #e2e4e8; background: #fff; }
+  button.primary { background: #1350de; color: #fff; border-color: #1350de; }
+  .hint { font-size: 11px; color: #787d87; line-height: 1.45; margin: 4px 0 0; }
+  .kbd { font-family: ui-monospace, monospace; font-size: 10px; background: #f8f8f8; border: 1px solid #e2e4e8; border-radius: 4px; padding: 1px 4px; }
 </style>
 </head>
 <body>
@@ -20,7 +24,7 @@
   <button id="captureRegion">▭ Snap a region…</button>
   <button id="open">Open Snap Studio</button>
   <p class="hint">Whole tab: <span class="kbd">Alt+Shift+S</span> · Region: <span class="kbd">Alt+Shift+R</span>. Opens the editor with the capture already dropped in — no project or job to set up first.</p>
-  <p class="hint" id="status" style="color:#6415e1;min-height:14px"></p>
+  <p class="hint" id="status" style="color:#0c3491;min-height:14px"></p>
   <script src="popup.js"></script>
 </body>
 </html>

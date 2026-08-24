@@ -20,7 +20,7 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink);
 .btn { font-family: inherit; font-size: 12.5px; font-weight: 600; padding: 8px 13px; border-radius: 9px; cursor: pointer;
   border: 1px solid var(--line-2); background: var(--surface); color: var(--ink); }
 .btn:hover { border-color: var(--accent-line); background: var(--accent-soft); }
-.btn.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+.btn.primary { background: var(--accent); color: var(--color-neutral-0); border-color: var(--accent); }
 .btn.primary:hover { background: var(--accent-ink); border-color: var(--accent-ink); }
 .btn.sm { padding: 7px 11px; font-size: 12px; }
 .btn.ghost { background: transparent; border-color: transparent; }
@@ -31,12 +31,12 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink);
 /* ---- three-column body ------------------------------------------------ */
 .body { flex: 1; display: grid; grid-template-columns: 216px 1fr 260px; min-height: 0; }
 
-.palette-rail, .panel { background: var(--surface); overflow-y: auto; padding: 16px 14px; }
+.palette-rail, .panel, .lab-rail { background: var(--surface); overflow-y: auto; padding: 16px 14px; }
 .palette-rail { border-right: 1px solid var(--line); }
 .panel { border-left: 1px solid var(--line); }
-.palette-rail h3, .panel h3 { font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+.palette-rail h3, .panel h3, .lab-rail h3 { font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
   color: var(--muted); margin: 0 0 10px; display: flex; align-items: center; gap: 8px; }
-.palette-rail h3:not(:first-child) { margin-top: 22px; }
+.palette-rail h3:not(:first-child), .lab-rail h3:not(:first-child) { margin-top: 22px; }
 
 .palette { display: flex; flex-direction: column; gap: 6px; }
 .pal-btn { display: flex; align-items: center; gap: 9px; text-align: left; font-family: inherit; font-size: 13px;
@@ -59,13 +59,20 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink);
 /* ---- stage ------------------------------------------------------------ */
 .stage-wrap { position: relative; overflow: auto; background: var(--paper); display: flex; align-items: center; justify-content: center; }
 .stage-scaler { padding: 40px; display: flex; align-items: center; justify-content: center; }
-.stage { position: relative; background: #fff; box-shadow: var(--shadow-float); border-radius: 3px; overflow: visible; }
+/* #stage doubles as the screenshot-canvas layer when the frame is on, so it must
+   shrink-wrap its content rather than carry an explicit size — the padding then
+   just appears, with no geometry to recompute. */
+.stage { position: relative; display: inline-block; line-height: 0; overflow: visible; }
+/* with the frame off, the shot still needs to read as a sheet on the editor ground.
+   Editor chrome, not part of the export: body.render strips it below. */
+.stage:not(.cmp-screenshot-canvas) { background: var(--color-neutral-0); box-shadow: var(--shadow-float); border-radius: 3px; }
+.shot-wrap { position: relative; line-height: 0; }
 .stage img#baseImg { display: block; max-width: none; pointer-events: none; user-select: none; }
 .canvas { position: absolute; inset: 0; }
 
 /* full-bleed, no chrome, exact natural size — the state captured for export */
 body.render .topbar, body.render .body > aside, body.render .zoom-hud, body.render #dropHint { display: none !important; }
-body.render .stage-wrap { position: fixed; inset: 0; overflow: hidden; padding: 0; background: #fff; display: block; }
+body.render .stage-wrap { position: fixed; inset: 0; overflow: hidden; padding: 0; background: var(--color-neutral-0); display: block; }
 body.render .stage-scaler { padding: 0; transform: none !important; display: block; }
 body.render .stage { position: fixed; left: 0; top: 0; box-shadow: none; border-radius: 0; }
 
@@ -89,13 +96,162 @@ body.render .stage { position: fixed; left: 0; top: 0; box-shadow: none; border-
 .seg button { flex: 1; font-family: inherit; font-size: 12px; font-weight: 600; padding: 6px 0; border: none;
   background: var(--surface); color: var(--ink-2); cursor: pointer; border-right: 1px solid var(--line-2); }
 .seg button:last-child { border-right: none; }
-.seg button.on { background: var(--accent); color: #fff; }
+.seg button.on { background: var(--accent); color: var(--color-neutral-0); }
 .check-row { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--ink-2); cursor: pointer; }
 .del-row { margin-top: 4px; }
 .del-row .btn { width: 100%; color: var(--down); border-color: var(--down); }
-.del-row .btn:hover { background: var(--down); color: #fff; }
+.del-row .btn:hover { background: var(--down); color: var(--color-neutral-0); }
 
-.toast { position: fixed; left: 50%; bottom: 26px; transform: translate(-50%, 12px); background: var(--ink); color: #fff;
+.toast { position: fixed; left: 50%; bottom: 26px; transform: translate(-50%, 12px); background: var(--ink); color: var(--color-neutral-0);
   font-size: 12.5px; font-weight: 600; padding: 9px 16px; border-radius: 999px; opacity: 0; pointer-events: none;
   transition: opacity .18s var(--ease), transform .18s var(--ease); z-index: 999; box-shadow: var(--shadow-float); }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+/* =====================================================================
+   COMPONENTS TAB — kit preview + component authoring.
+
+   Same furniture vocabulary as the Snap view (rails, .seg, .btn, .panel);
+   only the middle column is new. Editor chrome, never exported: the whole
+   <main class="lab"> is display:none under body.render.
+   ===================================================================== */
+
+/* ---- view switcher ---------------------------------------------------- */
+.viewtabs { display: flex; gap: 2px; margin-left: 10px; padding: 2px; background: var(--paper);
+  border: 1px solid var(--line); border-radius: 10px; }
+.vtab { font-family: inherit; font-size: 12.5px; font-weight: 600; color: var(--ink-2); padding: 5px 14px;
+  border: none; border-radius: 8px; background: transparent; cursor: pointer; }
+.vtab:hover { color: var(--ink); }
+.vtab.on { background: var(--surface); color: var(--ink); box-shadow: 0 1px 2px rgba(16,24,40,.09); }
+
+.tb-actions { display: flex; align-items: center; gap: 10px; }
+.tb-note { font-size: 11.5px; color: var(--muted); }
+body.view-snap .tb-actions[data-for="lab"], body.view-lab .tb-actions[data-for="snap"] { display: none; }
+body.view-snap .lab { display: none; }
+body.view-lab .body { display: none; }
+body.render .lab, body.render .viewtabs { display: none !important; }
+
+.btn.block { width: 100%; margin-top: 8px; }
+.lab { flex: 1; display: grid; grid-template-columns: 216px 1fr 300px; min-height: 0; }
+.lab-rail { border-right: 1px solid var(--line); }
+.lab-rail code, .lab-panel code { font-family: var(--mono); font-size: 11px; background: var(--paper);
+  border: 1px solid var(--line); border-radius: 4px; padding: 0 3px; }
+
+/* ---- accent picker: re-tone the whole kit -------------------------------- */
+.accent-picker { display: flex; flex-wrap: wrap; gap: 8px; }
+.swatch { --sw: var(--accent); width: 28px; height: 28px; flex: none; padding: 0; margin: 0;
+  border-radius: 50%; border: 2px solid var(--surface); box-shadow: 0 0 0 1px var(--line-2);
+  background: var(--sw); cursor: pointer; }
+.swatch:hover { box-shadow: 0 0 0 1px var(--line-2), 0 3px 8px -2px rgba(16, 24, 40, .35); }
+.swatch.on { box-shadow: 0 0 0 1px var(--surface), 0 0 0 3px var(--sw); }
+.swatch-custom { display: block; padding: 3px; border: 2px dashed var(--line-2); background: var(--surface);
+  box-shadow: none; }
+.swatch-custom.on { border-style: solid; border-color: var(--ink); }
+.swatch-custom input[type="color"] { display: block; width: 100%; height: 100%; padding: 0; border: none;
+  cursor: pointer; background: none; }
+.swatch-custom input[type="color"]::-webkit-color-swatch-wrapper { padding: 0; }
+.swatch-custom input[type="color"]::-webkit-color-swatch { border: none; border-radius: 50%; }
+.accent-status { display: flex; align-items: center; justify-content: space-between; margin-top: 9px; }
+.accent-status code { font-size: 11.5px; }
+.accent-status .btn:disabled { opacity: .4; }
+
+/* ---- component list --------------------------------------------------- */
+.cmp-list { display: flex; flex-direction: column; gap: 2px; }
+.cmp-row { display: flex; align-items: center; gap: 9px; padding: 7px 9px; border-radius: 8px; font-size: 13px;
+  font-weight: 600; color: var(--ink); cursor: pointer; border: 1px solid transparent; }
+.cmp-row:hover { background: var(--paper); border-color: var(--line); }
+.cmp-row.on { background: var(--accent-soft); border-color: var(--accent-line); color: var(--accent-ink); }
+.cmp-row .cglyph { width: 18px; flex: none; text-align: center; opacity: .8; }
+.cmp-row .cname { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cmp-row .ctag { font-family: var(--mono); font-size: 8.5px; font-weight: 700; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--muted); border: 1px solid var(--line-2); border-radius: 4px; padding: 1px 4px; }
+
+/* ---- preview stage ----------------------------------------------------- */
+.lab-stage-wrap { display: flex; flex-direction: column; min-width: 0; background: var(--paper); }
+.lab-groundbar { display: flex; align-items: center; gap: 14px; padding: 9px 16px; flex: none;
+  background: var(--surface); border-bottom: 1px solid var(--line); }
+.lab-groundbar .seg { flex: none; }
+.lab-groundbar .seg button { padding: 5px 13px; white-space: nowrap; }
+.lab-groundbar .spacer { flex: 1; }
+
+/* No filter / opacity / 3D transform on this element or .lab-specimen — either one
+   makes a new backdrop root and the glass components would preview as flat cards. */
+.lab-stage { position: relative; flex: 1; min-height: 260px; margin: 18px; border-radius: 14px;
+  overflow: hidden; box-shadow: var(--shadow-float); background: var(--color-neutral-0); }
+/* The kit ships no "ground" primitives — its own preview grounds live in the
+   upstream gallery, not in a layer any consumer gets. These are the editor's,
+   built from kit tokens: what the Components tab stands a specimen on, so that
+   .on-dark can be checked at all rather than taken on faith. */
+.lab-ground { position: absolute; inset: 0; z-index: 0; }
+.lab-ground--light { background: var(--color-neutral-50); }
+.lab-ground--dark { background: var(--color-neutral-900); }
+.lab-ground::after { content: ""; position: absolute; inset: 0; background-size: 24px 24px; }
+.lab-ground--light::after { background-image: radial-gradient(rgba(var(--color-neutral-900-rgb), .06) 1px, transparent 1px); }
+.lab-ground--dark::after { background-image: radial-gradient(rgba(var(--color-neutral-0-rgb), .07) 1px, transparent 1px); }
+.lab-shot { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; z-index: 0; }
+.lab-specimen { position: absolute; inset: 0; z-index: 3; display: grid; place-items: center; padding: 28px; }
+.lab-specimen > * { max-width: 100%; }
+
+/* mock page content, so blur and glass have something real underneath */
+.lab-mock { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 1;
+  width: min(520px, 80%); border-radius: 12px; overflow: hidden; background: var(--w-bg);
+  border: 1px solid var(--w-line); box-shadow: 0 18px 40px -22px rgba(16,24,40,.45); }
+.lab-mock .lm-bar { display: flex; align-items: center; gap: 6px; padding: 9px 12px; background: var(--w-bar);
+  border-bottom: 1px solid var(--w-line); }
+.lab-mock .lm-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--w-line); flex: none; }
+.lab-mock .lm-url { margin-left: 8px; font-family: var(--mono); font-size: 10px; color: var(--w-mut);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lab-mock .lm-body { padding: 18px 20px 22px; display: flex; flex-direction: column; gap: 9px; }
+.lab-mock .lm-h { width: 46%; height: 13px; border-radius: 4px; background: var(--w-text); opacity: .82; }
+.lab-mock .lm-l { height: 8px; border-radius: 4px; background: var(--w-line-2); }
+.lab-mock .lm-l.short { width: 62%; }
+.lab-mock .lm-row { display: flex; gap: 7px; margin: 3px 0; }
+.lab-mock .lm-chip { width: 46px; height: 20px; border-radius: 6px; background: var(--w-line-2); }
+.lab-mock .lm-chip.w { width: 74px; }
+.lab-mock .lm-text { font-family: var(--mono); font-size: 11.5px; color: var(--w-text); opacity: .78; margin: 2px 0; }
+
+.lab-stage.on-dark .lab-mock { background: var(--color-neutral-900); border-color: var(--color-neutral-700); }
+.lab-stage.on-dark .lab-mock .lm-bar { background: var(--color-neutral-800); border-bottom-color: var(--color-neutral-700); }
+.lab-stage.on-dark .lab-mock .lm-dot, .lab-stage.on-dark .lab-mock .lm-l,
+.lab-stage.on-dark .lab-mock .lm-chip { background: var(--color-neutral-700); }
+.lab-stage.on-dark .lab-mock .lm-h { background: var(--color-neutral-100); }
+.lab-stage.on-dark .lab-mock .lm-url { color: var(--color-neutral-400); }
+.lab-stage.on-dark .lab-mock .lm-text { color: var(--color-neutral-100); }
+
+.lab-specimen .demo-svg { overflow: visible; }
+
+/* ---- authoring panel ---------------------------------------------------- */
+.lab-panel .prop-row input[type="text"] { width: 100%; }
+.css-edit { width: 100%; min-height: 190px; font-family: var(--mono); font-size: 11.5px; line-height: 1.65;
+  padding: 9px 10px; border: 1px solid var(--line-2); border-radius: 8px; resize: vertical; tab-size: 2;
+  background: var(--paper); color: var(--ink); }
+.css-edit:focus { outline: 2px solid var(--accent-line); outline-offset: -1px; background: var(--surface); }
+.lint { display: flex; gap: 7px; font-size: 11.5px; line-height: 1.5; padding: 8px 10px; border-radius: 8px;
+  margin-bottom: 8px; }
+.lint b { flex: none; }
+.lint.warn { background: var(--accent-soft); color: var(--accent-ink); }
+.lint.bad { background: var(--color-error-50); color: var(--down); }
+.base-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+.base-btn { font-family: inherit; font-size: 12.5px; font-weight: 600; color: var(--ink); padding: 10px 8px;
+  border: 1px solid var(--line-2); border-radius: 9px; background: var(--surface); cursor: pointer; text-align: center; }
+.base-btn:hover { border-color: var(--accent-line); background: var(--accent-soft); color: var(--accent-ink); }
+.base-btn small { display: block; font-weight: 500; font-size: 10.5px; color: var(--muted); margin-top: 2px; }
+.base-btn:hover small { color: var(--accent-ink); opacity: .8; }
+.lab-blurb { font-size: 12.5px; line-height: 1.6; color: var(--ink-2); margin: 0 0 14px; }
+.lab-blurb code { font-family: var(--mono); font-size: 11px; }
+
+
+/* ---- the catalog's own words, in the Components panel --------------------- */
+.kit-doc { margin-top: 10px; border-top: 1px solid var(--line); padding-top: 10px; }
+.kit-doc summary { font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
+  color: var(--muted); cursor: pointer; list-style: none; }
+.kit-doc summary::-webkit-details-marker { display: none; }
+.kit-doc summary::before { content: "▸  "; }
+.kit-doc[open] summary::before { content: "▾  "; }
+.kit-doc summary:hover { color: var(--ink); }
+.kit-doc p { font-size: 12px; line-height: 1.6; color: var(--ink-2); margin: 8px 0 0; }
+.kit-doc ul { margin: 8px 0 0; padding-left: 15px; }
+.kit-doc li { font-size: 12px; line-height: 1.55; color: var(--ink-2); margin-top: 8px; }
+.var-list { display: flex; flex-wrap: wrap; gap: 5px; }
+.var-list code { font-family: var(--mono); font-size: 10.5px; background: var(--paper);
+  border: 1px solid var(--line); border-radius: 4px; padding: 2px 5px; color: var(--ink-2); }
+.pal-btn small { font-weight: 500; font-size: 10.5px; color: var(--muted); margin-left: 3px; }
