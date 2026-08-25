@@ -792,6 +792,23 @@ body.render .shot-wrap.base-selected::after { display: none !important; }
 .el.selected .handle { display: block; }
 body.render .handle { display: none !important; }
 
+/* ---- delete button ---------------------------------------------------------
+   Top-right corner, opposite the resize handle's bottom-right so the two never
+   collide. Same host as the resize handle (handleHost() in editor.js): a
+   spotlight gets it on the actual cutout box, not the invisible canvas-sized
+   wrapper — `.el.selected .el-del` matches at any nesting depth, so no extra
+   selector is needed for that case. Not offered on arrow (a two-point line
+   has no single corner to hang it from — see render() in editor.js) or on
+   the context stamp (the topbar toggle is already its delete). */
+.el-del { position: absolute; top: -8px; right: -8px; width: 18px; height: 18px;
+  display: none; align-items: center; justify-content: center; padding: 0;
+  border-radius: 50%; border: 2px solid var(--color-neutral-0); box-shadow: var(--shadow-sm);
+  background: var(--down); color: var(--color-neutral-0); font-size: 11px; line-height: 1;
+  cursor: pointer; z-index: 10; }
+.el-del:hover { background: var(--color-error-600); }
+.el.selected .el-del { display: flex; }
+body.render .el-del { display: none !important; }
+
 /* ---- arrow --------------------------------------------------------------
    The wrapper spans the whole canvas (the two anchor points can be anywhere),
    so it must NOT catch clicks across that entire empty area. Only the invisible
@@ -851,28 +868,9 @@ body.render .el[data-type="spotlight"].selected .cmp-spotlight-cutout { outline:
 .el[data-type="zoom"][data-shape="circle"] .handle.radius { display: none; }
 
 /* ---- highlight-box: Snap Studio extensions --------------------------------
-   Shape (rect/ellipse), border width and the overlay toggle are added in
-   editor.js (highlightBoxStyle/elStyle/handleHost) — the vendored
-   .cmp-highlight-box rule above is never touched; every visual change is
-   layered on via inline style. --sel-radius tracks shape the same way
-   --sel-radius already does for zoom-magnify above. */
+   Shape (rect/ellipse) and border width are added in editor.js
+   (highlightBoxStyle) — the vendored .cmp-highlight-box rule above is never
+   touched; every visual change is layered on via inline style. --sel-radius
+   tracks shape the same way --sel-radius already does for zoom-magnify
+   above. No "dim the surround" variant here — that's spotlight's own job. */
 .el[data-type="highlight"].selected::after { border-radius: var(--sel-radius, var(--radius-lg)); }
-
-/* overlay:true switches this element's whole wrapper anatomy to the same
-   canvas-sized, clipped, cutout-in-a-child pattern spotlight uses above (see
-   elStyle()/handleHost() in editor.js) — same reason: the dim comes from a
-   9999px box-shadow spread on the box itself, which needs an overflow:hidden
-   ancestor sized to the frame or it bleeds past the screenshot's edges. */
-.el[data-type="highlight"][data-overlay="true"] { cursor: default; pointer-events: none; overflow: hidden; }
-.el[data-type="highlight"][data-overlay="true"].selected::after { display: none; }
-/* position:absolute is NOT part of the vendored .cmp-highlight-box rule (unlike
-   .cmp-spotlight-cutout, which ships with it) — it's only ever needed for this
-   overlay anatomy, where highlightBoxStyle() positions the box via inline
-   left/top against its now canvas-sized parent. Scoped here rather than added
-   to the vendored rule above so the plain (non-overlay) box, which just fills
-   its own already-positioned .el via width/height, is untouched. */
-.el[data-type="highlight"][data-overlay="true"] .cmp-highlight-box { position: absolute; pointer-events: auto; cursor: grab; }
-.el[data-type="highlight"][data-overlay="true"] .cmp-highlight-box:active { cursor: grabbing; }
-.el[data-type="highlight"][data-overlay="true"].selected .cmp-highlight-box {
-  outline: 1.5px dashed var(--color-neutral-0); outline-offset: 4px; }
-body.render .el[data-type="highlight"][data-overlay="true"].selected .cmp-highlight-box { outline: none !important; }

@@ -9,8 +9,8 @@
 <style>
   body { width: 258px; margin: 0; font-family: 'Inter', system-ui, sans-serif; color: #14151a; padding: 14px; }
   .row { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
-  .mk { width: 22px; height: 22px; border-radius: 6px; background: linear-gradient(140deg, #4d7ceb, #1350de); }
-  .t { font-weight: 700; font-size: 13px; letter-spacing: -.02em; }
+  .mk { display: block; width: 22px; height: 22px; flex: none; }
+  .t { font-weight: 800; font-size: 13px; letter-spacing: -.02em; text-transform: uppercase; }
   .t small { display: block; font-family: ui-monospace, monospace; font-size: 8px; letter-spacing: .16em; text-transform: uppercase; color: #0c3491; margin-top: 1px; }
   button { width: 100%; font-family: inherit; font-size: 13px; font-weight: 600; padding: 9px; border-radius: 9px; cursor: pointer; margin-bottom: 7px; border: 1px solid #e2e4e8; background: #fff; }
   button.primary { background: #1350de; color: #fff; border-color: #1350de; }
@@ -19,10 +19,19 @@
 </style>
 </head>
 <body>
-  <div class="row"><span class="mk"></span><span class="t">Snap Studio<small>snap · annotate · export</small></span></div>
-  <button class="primary" id="capture">📸 Snap visible tab</button>
+  <div class="row">
+    <svg class="mk" viewBox="0 0 88 88" fill="none" aria-hidden="true">
+      <path d="M4 26V4H26" stroke="#14151a" stroke-width="6"/>
+      <path d="M84 26V4H62" stroke="#14151a" stroke-width="6"/>
+      <path d="M4 62V84H26" stroke="#14151a" stroke-width="6"/>
+      <path d="M84 62V84H62" stroke="#14151a" stroke-width="6"/>
+      <path d="M32 30L60 44L48 48L46 60L32 30Z" fill="#1350de"/>
+    </svg>
+    <span class="t">Snap Studio<small>snap · annotate · export</small></span>
+  </div>
+  <button class="primary" id="open">Open Snap Studio</button>
+  <button id="capture">📸 Snap visible tab</button>
   <button id="captureRegion">▭ Snap a region…</button>
-  <button id="open">Open Snap Studio</button>
   <p class="hint">Whole tab: <span class="kbd">Alt+Shift+S</span> · Region: <span class="kbd">Alt+Shift+R</span>. Opens the editor with the capture already dropped in — no project or job to set up first.</p>
   <p class="hint" id="status" style="color:#0c3491;min-height:14px"></p>
   <script src="popup.js"></script>

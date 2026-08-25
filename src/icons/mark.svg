@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="88" height="88" viewBox="0 0 88 88" fill="none">
+  <!-- Snap Studio icon mark: viewfinder frame + cursor glyph.
+       Master reference at native 88x88; see design_handoff_snap_studio_logo/README.md.
+       In-app copies (popup.html, editor.html topbar) inline this same path data at 22-24px
+       with a thicker stroke (6, vs. this master's 4) for legibility at that size. -->
+  <path d="M4 26V4H26" stroke="#14151a" stroke-width="4"/>
+  <path d="M84 26V4H62" stroke="#14151a" stroke-width="4"/>
+  <path d="M4 62V84H26" stroke="#14151a" stroke-width="4"/>
+  <path d="M84 62V84H62" stroke="#14151a" stroke-width="4"/>
+  <path d="M32 30L60 44L48 48L46 60L32 30Z" fill="#1350de"/>
+</svg>

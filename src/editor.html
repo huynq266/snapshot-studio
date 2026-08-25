@@ -26,7 +26,16 @@
 <body class="view-snap">
 <div class="app">
   <header class="topbar">
-    <div class="logo"><span class="mk"></span><span>Snap Studio <small>snap · annotate · export</small></span></div>
+    <div class="logo">
+      <svg class="mk" viewBox="0 0 88 88" fill="none" aria-hidden="true">
+        <path d="M4 26V4H26" stroke="var(--ink)" stroke-width="6"/>
+        <path d="M84 26V4H62" stroke="var(--ink)" stroke-width="6"/>
+        <path d="M4 62V84H26" stroke="var(--ink)" stroke-width="6"/>
+        <path d="M84 62V84H62" stroke="var(--ink)" stroke-width="6"/>
+        <path d="M32 30L60 44L48 48L46 60L32 30Z" fill="var(--accent)"/>
+      </svg>
+      <span>Snap Studio <small>snap · annotate · export</small></span>
+    </div>
     <nav class="viewtabs" id="viewTabs">
       <button class="vtab on" data-view="snap">Snap</button>
       <button class="vtab" data-view="lab">Components</button>
@@ -166,8 +175,24 @@
   </main>
 </div>
 <input type="file" id="fileInput" accept="image/*" hidden />
+<input type="file" id="mdInput" accept=".md,.markdown,text/markdown" hidden />
 <div class="toast" id="toast"></div>
 <script src="kit-catalog.js"></script>
+<script src="components/step.js"></script>
+<script src="components/textbox.js"></script>
+<script src="components/highlight.js"></script>
+<script src="components/spotlight.js"></script>
+<script src="components/zoom.js"></script>
+<script src="components/blur.js"></script>
+<script src="components/arrow.js"></script>
+<script src="components/screenshot-canvas.js"></script>
+<script src="components/label.js"></script>
+<script src="components/image.js"></script>
+<script src="components/custom.js"></script>
+<script src="context-stamp.js"></script>
+<script src="accent.js"></script>
+<script src="export.js"></script>
+<script src="lab.js"></script>
 <script src="editor.js"></script>
 </body>
 </html>
