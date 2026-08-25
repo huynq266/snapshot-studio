@@ -30,8 +30,8 @@
     },
 
     propsHtml(el, ctx) {
-      return ctx.rowCheck('pDark', 'Ảnh bên dưới vốn đã tối (on-dark)', el.dark)
-        + ctx.note('Làm tối cả khung, chỉ chừa một lỗ. Dành cho bước cần mắt không bị gì khác kéo đi — đừng dùng như một highlight-box đậm hơn.');
+      return ctx.rowCheck('pDark', 'The shot underneath is already dark (Dark mode)', el.dark)
+        + ctx.note('Darkens the whole frame and leaves a single hole. For a step where nothing else may pull the eye away — do not use it as a stronger highlight box.');
     },
 
     bindProps(el, ctx) {
@@ -49,7 +49,7 @@
     },
 
     labPropsHtml(v, ctx) {
-      return ctx.rowCheck('kDark', 'Ảnh bên dưới vốn tối (on-dark)', v.dark);
+      return ctx.rowCheck('kDark', 'The shot underneath is dark (Dark mode)', v.dark);
     },
 
     labBindProps(v, ctx) {

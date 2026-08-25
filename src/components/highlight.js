@@ -37,15 +37,15 @@
 
     propsHtml(el, ctx) {
       const bw = borderWidth(el);
-      return ctx.rowSeg('pHShape', 'Hình dạng', [['rect', 'Chữ nhật bo góc'], ['ellipse', 'Tròn / Elip']], el.shape || 'rect')
-        + `<div class="prop-row"><label id="pBorderWLabel">Độ dày viền — ${bw}px</label><input type="range" id="pBorderW" min="1" max="8" step="0.5" value="${bw}" style="width:100%"></div>`
-        + ctx.rowCheck('pShaded', 'Tô nền nhạt (--shaded)', el.shaded)
-        + ctx.note('Mặc định là chỉ viền. Chỉ tô nền khi khung này phải tự gánh sự chú ý — không có mũi tên hay số bước nào chỉ vào. Vùng có chữ nhỏ thì luôn dùng viền: nền 10% vẫn làm giảm tương phản đo được. Kéo góc dưới-phải để đổi kích thước tự do theo cả hai chiều — kể cả ở dạng Tròn/Elip, không bị ép về hình tròn như Zoom/Magnify. Cần làm tối phần ảnh bên ngoài khung thì dùng Spotlight — đó là component chuyên cho việc đó. Hình Tròn/Elip là phần Snap Studio tự thêm — bản gốc trong kit chỉ có hình chữ nhật bo góc.');
+      return ctx.rowSeg('pHShape', 'Shape', [['rect', 'Rounded rectangle'], ['ellipse', 'Circle / Ellipse']], el.shape || 'rect')
+        + `<div class="prop-row"><label id="pBorderWLabel">Border width — ${bw}px</label><input type="range" id="pBorderW" min="1" max="8" step="0.5" value="${bw}" style="width:100%"></div>`
+        + ctx.rowCheck('pShaded', 'Fill', el.shaded)
+        + ctx.note('Border only by default. Fill it only when this box has to carry the attention on its own — no arrow, no step number pointing at it. Over small text always use the border: even a 10% fill measurably drops contrast. Drag the bottom-right corner to resize freely on both axes — including in Circle / Ellipse form, which is not forced back into a circle the way Zoom / Magnify is. To darken the shot outside the box, use Spotlight — that is the component made for it. Circle / Ellipse is added by Snap Studio — the kit original only has the rounded rectangle.');
     },
 
     bindProps(el, ctx) {
       ctx.flag('#pShaded', 'shaded');
-      ctx.on('#pBorderW', 'input', (e) => { el.borderWidth = +e.target.value; ctx.syncNode(el); ctx.$('#pBorderWLabel').textContent = `Độ dày viền — ${el.borderWidth}px`; });
+      ctx.on('#pBorderW', 'input', (e) => { el.borderWidth = +e.target.value; ctx.syncNode(el); ctx.$('#pBorderWLabel').textContent = `Border width — ${el.borderWidth}px`; });
       ctx.seg('#pHShape', 'shape');
     },
 
@@ -56,7 +56,7 @@
     },
 
     labPropsHtml(v, ctx) {
-      return ctx.rowCheck('kShaded', 'Tô nền nhạt (--shaded)', v.shaded);
+      return ctx.rowCheck('kShaded', 'Fill', v.shaded);
     },
 
     labBindProps(v, ctx) {

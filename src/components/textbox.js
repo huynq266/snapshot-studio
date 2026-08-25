@@ -34,7 +34,7 @@
       // box's top-left corner (an estimated starting height centers it well enough),
       // not its center like most other element types.
       return { x: c.x - 140, y: c.y - 70, w: 280, mode: 'step',
-        title: 'Mở phần Cài đặt', body: 'Bấm biểu tượng ở thanh bên để xem toàn bộ danh sách.', label: 'Mẹo',
+        title: 'Open Settings', body: 'Click the icon in the sidebar to see the whole list.', label: 'Tip',
         compactBadge: false, hideTitle: false, hideBody: false, customNumber: null,
         border: false, borderWidth: 1.5, fontSize: null };
     },
@@ -43,7 +43,7 @@
       // step mode and note mode are mutually exclusive by spec — a box never renders
       // both a badge+title header and a freeform label.
       // pre-wrap: HTML collapses a raw "\n" from the textarea to a space by default —
-      // without it, pressing Enter in Nội dung has no visible effect on the card.
+      // without it, pressing Enter in Content has no visible effect on the card.
       const fs = `font-size:${fontSize(el)}px;white-space:pre-wrap`;
       const head = el.mode === 'step'
         ? (el.hideTitle ? '' : `<div class="cmp-text-box__header"><span class="cmp-step-marker${el.compactBadge ? ' cmp-step-marker--compact' : ''}">${ctx.stepLabel(el, el.compactBadge)}</span>`
@@ -65,19 +65,19 @@
     propsHtml(el, ctx) {
       const borderW = el.borderWidth != null ? el.borderWidth : 1.5;
       const fs = fontSize(el);
-      let html = ctx.rowSeg('pMode', 'Kiểu', [['step', 'Gắn với bước'], ['note', 'Ghi chú rời']], el.mode);
+      let html = ctx.rowSeg('pMode', 'Kind', [['step', 'Tied to a step'], ['note', 'Standalone note']], el.mode);
       html += el.mode === 'step'
-        ? ctx.rowInput('pTitle', 'Tiêu đề', el.title) + ctx.rowCheck('pHideTitle', 'Ẩn tiêu đề (ẩn luôn badge Step)', el.hideTitle)
-          + (el.hideTitle ? '' : `<div class="prop-row"><label>Số bước — để trống là tự động</label><input type="number" id="pStepNumber" min="1" step="1" placeholder="${ctx.stepNumber(el.id)}" value="${el.customNumber != null ? el.customNumber : ''}"></div>`
-            + ctx.rowCheck('pCompactBadge', 'Badge rút gọn (số trần)', el.compactBadge))
-        : ctx.rowInput('pLabel', 'Nhãn (để trống là ẩn)', el.label);
-      html += ctx.rowText('pBody', 'Nội dung', el.body, 4) + ctx.rowCheck('pHideBody', 'Ẩn nội dung', el.hideBody);
-      html += ctx.rowCheck('pBorder', 'Thêm viền cho khung', el.border);
+        ? ctx.rowInput('pTitle', 'Title', el.title) + ctx.rowCheck('pHideTitle', 'Hide the title (hides the Step badge too)', el.hideTitle)
+          + (el.hideTitle ? '' : `<div class="prop-row"><label>Step number — blank means automatic</label><input type="number" id="pStepNumber" min="1" step="1" placeholder="${ctx.stepNumber(el.id)}" value="${el.customNumber != null ? el.customNumber : ''}"></div>`
+            + ctx.rowCheck('pCompactBadge', 'Compact badge (bare number)', el.compactBadge))
+        : ctx.rowInput('pLabel', 'Label (blank hides it)', el.label);
+      html += ctx.rowText('pBody', 'Content', el.body, 4) + ctx.rowCheck('pHideBody', 'Hide the content', el.hideBody);
+      html += ctx.rowCheck('pBorder', 'Add a border to the card', el.border);
       if (el.border) {
-        html += `<div class="prop-row"><label id="pBorderWLabel">Độ dày viền — ${borderW}px</label><input type="range" id="pBorderW" min="1" max="4" step="0.5" value="${borderW}" style="width:100%"></div>`;
+        html += `<div class="prop-row"><label id="pBorderWLabel">Border width — ${borderW}px</label><input type="range" id="pBorderW" min="1" max="4" step="0.5" value="${borderW}" style="width:100%"></div>`;
       }
-      html += `<div class="prop-row"><label id="pFontSizeLabel">Cỡ chữ — ${fs}px</label><input type="range" id="pFontSize" min="11" max="20" step="1" value="${fs}" style="width:100%"></div>`;
-      html += ctx.note('Đừng để vừa có step-marker rời vừa có text-box gắn bước cho cùng một số trên một khung — đó là hai nhãn trùng nhau tranh nhau, không phải rõ hơn. Viền dùng màu trung tính, không phải accent — primary-500 chỉ dành cho badge và connector, viền màu accent ở đây sẽ khiến khung này trông quan trọng ngang khung nó đang giải thích. Kéo góc dưới-phải để đổi bề rộng; chiều cao luôn tự khớp theo nội dung, kể cả khi xuống dòng bằng Enter.');
+      html += `<div class="prop-row"><label id="pFontSizeLabel">Font size — ${fs}px</label><input type="range" id="pFontSize" min="11" max="20" step="1" value="${fs}" style="width:100%"></div>`;
+      html += ctx.note('Do not put a standalone step marker and a step-tied text box on the same number in one frame — that is two labels competing with each other, not more clarity. The border uses a neutral colour, not the accent — primary-500 is for the badge and the connector only, and an accent border here would make this card look as important as the one it explains. Drag the bottom-right corner to change the width; the height always follows the content, including line breaks typed with Enter.');
       return html;
     },
 
@@ -89,8 +89,8 @@
       ctx.flag('#pHideBody', 'hideBody');
       ctx.flag('#pCompactBadge', 'compactBadge');
       ctx.flag('#pBorder', 'border', true);
-      ctx.on('#pBorderW', 'input', (e) => { el.borderWidth = +e.target.value; ctx.syncNode(el); ctx.$('#pBorderWLabel').textContent = `Độ dày viền — ${el.borderWidth}px`; });
-      ctx.on('#pFontSize', 'input', (e) => { el.fontSize = +e.target.value; ctx.syncNode(el); ctx.$('#pFontSizeLabel').textContent = `Cỡ chữ — ${el.fontSize}px`; });
+      ctx.on('#pBorderW', 'input', (e) => { el.borderWidth = +e.target.value; ctx.syncNode(el); ctx.$('#pBorderWLabel').textContent = `Border width — ${el.borderWidth}px`; });
+      ctx.on('#pFontSize', 'input', (e) => { el.fontSize = +e.target.value; ctx.syncNode(el); ctx.$('#pFontSizeLabel').textContent = `Font size — ${el.fontSize}px`; });
       ctx.on('#pStepNumber', 'input', (e) => {
         const raw = e.target.value.trim();
         el.customNumber = raw === '' ? null : Math.max(1, Math.round(+raw));
@@ -99,8 +99,8 @@
       ctx.seg('#pMode', 'mode', true);
     },
 
-    demo: { mode: 'step', title: 'Mở phần Cài đặt', label: 'Mẹo', compactBadge: false,
-      body: 'Bấm biểu tượng ở thanh bên để xem toàn bộ chiến dịch trong một danh sách.' },
+    demo: { mode: 'step', title: 'Open Settings', label: 'Tip', compactBadge: false,
+      body: 'Click the icon in the sidebar to see every campaign in one list.' },
 
     labSpecimen(v, ctx) {
       const head = v.mode === 'step'
@@ -111,11 +111,11 @@
     },
 
     labPropsHtml(v, ctx) {
-      let html = ctx.rowSeg('kMode', 'Kiểu', [['step', 'Gắn với bước'], ['note', 'Ghi chú rời']], v.mode);
+      let html = ctx.rowSeg('kMode', 'Kind', [['step', 'Tied to a step'], ['note', 'Standalone note']], v.mode);
       html += v.mode === 'step'
-        ? ctx.rowInput('kTitle', 'Tiêu đề', v.title) + ctx.rowCheck('kCompactBadge', 'Badge rút gọn', v.compactBadge)
-        : ctx.rowInput('kLabel', 'Nhãn', v.label);
-      html += ctx.rowText('kBody', 'Nội dung', v.body, 3);
+        ? ctx.rowInput('kTitle', 'Title', v.title) + ctx.rowCheck('kCompactBadge', 'Compact badge', v.compactBadge)
+        : ctx.rowInput('kLabel', 'Label', v.label);
+      html += ctx.rowText('kBody', 'Content', v.body, 3);
       return html;
     },
 

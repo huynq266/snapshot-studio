@@ -42,16 +42,15 @@
     </nav>
     <div class="spacer"></div>
     <div class="tb-actions" data-for="snap">
-      <label class="stamp-toggle"><input type="checkbox" id="frameToggle" checked> Khung ảnh</label>
+      <label class="stamp-toggle"><input type="checkbox" id="frameToggle" checked> Image frame</label>
       <label class="stamp-toggle"><input type="checkbox" id="stampToggle"> Context stamp</label>
       <button id="copyImg" class="btn sm" title="Copy the annotated image (Ctrl+C)">⧉ Copy image</button>
-      <button id="copyCtx" class="btn sm" title="Copy browser · OS · URL · time as text">⧉ Copy context</button>
       <button id="downloadPng" class="btn primary" title="Export the annotated PNG">⬇ Export PNG</button>
     </div>
     <div class="tb-actions" data-for="lab">
-      <span class="tb-note">Component bạn tạo chỉ sống trong profile trình duyệt này</span>
-      <button id="labNew" class="btn sm">+ Component mới</button>
-      <button id="labCopyCss" class="btn primary" title="Copy CSS của mọi component tự tạo, để dán vào tokens.css">⧉ Copy CSS</button>
+      <span class="tb-note">Components you make live only in this browser profile</span>
+      <button id="labNew" class="btn sm">+ New component</button>
+      <button id="labCopyCss" class="btn primary" title="Copy the CSS of every custom component, ready to paste into tokens.css">⧉ Copy CSS</button>
     </div>
   </header>
 
@@ -66,9 +65,9 @@
         <button class="pal-btn" data-add="zoom"><span class="ico">🔍</span>Zoom / Magnify</button>
         <button class="pal-btn" data-add="blur"><span class="ico">▒</span>Privacy Blur</button>
         <button class="pal-btn" data-add="arrow"><span class="ico">↗</span>Arrow</button>
-        <button class="pal-btn" data-add="label"><span class="ico">🏷️</span>Nhãn <small>(ngoài kit)</small></button>
+        <button class="pal-btn" data-add="label"><span class="ico">🏷️</span>Label <small>(outside the kit)</small></button>
       </div>
-      <h3>Của bạn <span id="customPalCount" class="kbd"></span></h3>
+      <h3>Yours <span id="customPalCount" class="kbd"></span></h3>
       <div class="palette" id="customPalette"></div>
       <p class="empty-hint">Click to drop a component in the middle of the shot, then drag it into place. <span class="kbd">⌫</span> deletes the selected one, <span class="kbd">Ctrl</span> <span class="kbd">C</span> copies the finished image, <span class="kbd">Ctrl</span> <span class="kbd">V</span> pastes another image in as its own layer.</p>
       <h3>Layers <span id="layerCount" class="kbd"></span></h3>
@@ -111,38 +110,38 @@
   <!-- ============ Components tab: preview the kit, author new ones ============ -->
   <main class="lab">
     <aside class="lab-rail">
-      <h3>Màu chủ đạo</h3>
+      <h3>Accent colour</h3>
       <div class="accent-picker" id="accentPicker">
         <button class="swatch" type="button" data-hex="#7C2CFB" style="--sw:#7C2CFB" title="#7C2CFB"></button>
         <button class="swatch" type="button" data-hex="#6AE5FF" style="--sw:#6AE5FF" title="#6AE5FF"></button>
         <button class="swatch" type="button" data-hex="#390376" style="--sw:#390376" title="#390376"></button>
         <button class="swatch" type="button" data-hex="#06063F" style="--sw:#06063F" title="#06063F"></button>
         <button class="swatch" type="button" data-hex="#282828" style="--sw:#282828" title="#282828"></button>
-        <label class="swatch swatch-custom" id="accentCustomSwatch" title="Chọn màu khác…">
+        <label class="swatch swatch-custom" id="accentCustomSwatch" title="Pick another colour…">
           <input type="color" id="accentCustomInput" value="#1350de">
         </label>
       </div>
       <div class="accent-status">
         <code id="accentHexLabel">#1350DE</code>
-        <button class="btn ghost sm" id="accentReset">Mặc định</button>
+        <button class="btn ghost sm" id="accentReset">Default</button>
       </div>
-      <p class="empty-hint">Đổi tông áp dụng cho <b>toàn bộ</b> component — cả những cái đã thả lên ảnh — và cho chrome của editor. Không đụng đến component nào tự viết CSS hex cứng (lint đã cảnh báo việc đó).</p>
-      <h3>Kit chuẩn <span id="kitCount" class="kbd"></span></h3>
+      <p class="empty-hint">A new tone applies to <b>every</b> component — including the ones already on the shot — and to the editor chrome itself. It leaves alone any component that hardcodes its own hex CSS (the lint already warns about that).</p>
+      <h3>Standard kit <span id="kitCount" class="kbd"></span></h3>
       <div class="cmp-list" id="kitList"></div>
-      <h3>Của bạn <span id="customCount" class="kbd"></span></h3>
+      <h3>Yours <span id="customCount" class="kbd"></span></h3>
       <div class="cmp-list" id="customList"></div>
-      <button class="btn sm block" id="labNewRail">+ Component mới</button>
-      <p class="empty-hint">Component tự tạo lưu trong <code>chrome.storage</code> của máy này. Muốn đưa vào design kit thật thì bấm <b>Copy CSS</b> rồi dán vào <code>tokens.css</code>.</p>
+      <button class="btn sm block" id="labNewRail">+ New component</button>
+      <p class="empty-hint">Custom components are stored in <code>chrome.storage</code> on this machine. To get one into the real design kit, hit <b>Copy CSS</b> and paste it into <code>tokens.css</code>.</p>
     </aside>
 
     <div class="lab-stage-wrap">
       <div class="lab-groundbar">
         <div class="seg" id="groundSeg">
-          <button data-v="light" class="on">Nền sáng</button>
-          <button data-v="dark">Nền tối</button>
-          <button data-v="shot">Ảnh đã chụp</button>
+          <button data-v="light" class="on">Light ground</button>
+          <button data-v="dark">Dark ground</button>
+          <button data-v="shot">Your capture</button>
         </div>
-        <label class="check-row"><input type="checkbox" id="mockToggle" checked> Nội dung mẫu bên dưới</label>
+        <label class="check-row"><input type="checkbox" id="mockToggle" checked> Mock content underneath</label>
         <span class="spacer"></span>
         <span class="tb-note" id="groundNote"></span>
       </div>
@@ -153,12 +152,12 @@
         <!-- Real content under the glass: backdrop-filter has nothing to bend on a
              flat fill, so a component previewed over an empty stage lies to you. -->
         <div class="lab-mock" id="labMock">
-          <div class="lm-bar"><span class="lm-dot"></span><span class="lm-dot"></span><span class="lm-dot"></span><span class="lm-url">app.example.com/khach-hang/2841</span></div>
+          <div class="lm-bar"><span class="lm-dot"></span><span class="lm-dot"></span><span class="lm-dot"></span><span class="lm-url">app.example.com/customers/2841</span></div>
           <div class="lm-body">
             <div class="lm-h"></div>
             <div class="lm-l"></div>
             <div class="lm-l short"></div>
-            <div class="lm-text">nguyen.van.a@example.com · 0901 234 567</div>
+            <div class="lm-text">jane.doe@example.com · +1 555 0134</div>
             <div class="lm-row"><span class="lm-chip"></span><span class="lm-chip"></span><span class="lm-chip w"></span></div>
             <div class="lm-l"></div>
             <div class="lm-l short"></div>
@@ -176,6 +175,7 @@
 </div>
 <input type="file" id="fileInput" accept="image/*" hidden />
 <input type="file" id="mdInput" accept=".md,.markdown,text/markdown" hidden />
+<div class="render-veil" id="renderVeil"></div>
 <div class="toast" id="toast"></div>
 <script src="kit-catalog.js"></script>
 <script src="components/step.js"></script>

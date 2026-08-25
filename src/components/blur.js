@@ -28,7 +28,7 @@
     },
 
     propsHtml(el, ctx) {
-      return ctx.note('Che nguyên một dòng trường dữ liệu, đừng bo sát chiều cao chữ: blur 18px cần chỗ để loang, bó sát thì vệt bị nhoè không đều. Kéo góc dưới-phải để đổi kích thước.');
+      return ctx.note('Cover the whole data-field row, do not hug the height of the text: an 18px blur needs room to spread, and a tight box smears unevenly. Drag the bottom-right corner to resize.');
     },
 
     bindProps() {},

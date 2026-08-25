@@ -156,7 +156,7 @@
     return (comp && comp.glyph) || '•';
   }
   function layerName(el) {
-    if (el.type === 'custom') { const d = SnapKit.lab.customDef(el.cid); return d ? d.name : 'Component đã xoá'; }
+    if (el.type === 'custom') { const d = SnapKit.lab.customDef(el.cid); return d ? d.name : 'Deleted component'; }
     const comp = SnapKit.components[el.type];
     if (!comp) return el.type;
     if (comp.layerLabel) return comp.layerLabel;
@@ -227,10 +227,10 @@
 
     // Pinned first, because it is the bottom of the paint order, and with no ✕
     // because deleting the frame everything else is positioned against is not an
-    // edit — "start over" is the Thay ảnh nền button in its Properties panel.
+    // edit — "start over" is the Replace base image button in its Properties panel.
     const base = document.createElement('div');
     base.className = 'layer-row' + (selId === BASE_ID ? ' active' : '');
-    base.innerHTML = `<span class="lglyph">▣</span><span class="ltxt">Ảnh nền — ${capture.img.w}×${capture.img.h}</span>`;
+    base.innerHTML = `<span class="lglyph">▣</span><span class="ltxt">Base image — ${capture.img.w}×${capture.img.h}</span>`;
     base.addEventListener('click', () => select(BASE_ID));
     layersEl.appendChild(base);
 
@@ -249,15 +249,17 @@
    *  start, which a paste no longer provides now that pasting adds a layer instead of
    *  replacing the capture. */
   function renderBaseProps() {
-    propsTitle.textContent = 'Ảnh nền';
+    propsTitle.textContent = 'Base image';
     const n = capture.els.filter((e) => e.type === 'image').length;
     props.innerHTML =
-      `<p class="empty-hint" style="margin:0 0 14px">Ảnh chụp gốc. Nó quyết định khung của bản xuất, nên không kéo đi được — mọi lớp khác được đặt so với nó.</p>`
-      + `<p class="empty-hint">Kích thước <b>${capture.img.w}×${capture.img.h}px</b>`
-      + (capture.url ? ` · Nguồn <b>${escapeHtml(SnapKit.contextStamp.hostPath(capture.url))}</b>` : '')
-      + ` · <b>${n}</b> ảnh dán thêm</p>`
-      + `<p class="empty-hint">Dán thêm ảnh bằng <b>Ctrl+V</b> — mỗi lần dán là một lớp riêng, kéo được, đổi cỡ được.</p>`
-      + `<div class="del-row"><button class="btn" id="pReplace">Thay ảnh nền…</button></div>`;
+      `<p class="empty-hint" style="margin:0 0 14px">The original capture. It sets the frame of the export, so it cannot be dragged — every other layer is placed relative to it.</p>`
+      + `<p class="empty-hint">Size <b>${capture.img.w}×${capture.img.h}px</b>`
+      + (capture.url ? ` · Source <b>${escapeHtml(SnapKit.contextStamp.hostPath(capture.url))}</b>` : '')
+      + ` · <b>${n}</b> pasted images</p>`
+      + `<p class="empty-hint">Paste more images with <b>Ctrl+V</b> — every paste becomes its own layer, draggable and resizable.</p>`
+      // .btn.block, not .del-row: replacing the base image keeps every annotation
+      // on it, so it has no business wearing the delete footer's red.
+      + `<button class="btn block" id="pReplace">Replace base image…</button>`;
     $('#pReplace').addEventListener('click', () => fileInput.click());
   }
   function renderProps() {
@@ -265,7 +267,7 @@
     const el = capture.els.find((e) => e.id === selId);
     if (!el) {
       propsTitle.textContent = 'Properties';
-      props.innerHTML = '<p class="empty-hint">Chọn một component để sửa, hoặc bấm một cái trong danh sách bên trái để thêm.</p>';
+      props.innerHTML = '<p class="empty-hint">Select a component to edit it, or click one in the list on the left to add it.</p>';
       return;
     }
     propsTitle.textContent = layerName(el);
@@ -278,7 +280,7 @@
     const cat = catByType(el.type);
     let html = cat ? `<p class="empty-hint" style="margin:0 0 14px">${escapeHtml(cat.summary)}</p>` : '';
     html += comp.propsHtml ? comp.propsHtml(el, ctx) : '';
-    if (el.type !== 'stamp') html += `<div class="del-row"><button class="btn" id="pDelete">Xoá component này</button></div>`;
+    if (el.type !== 'stamp') html += `<div class="del-row"><button class="btn" id="pDelete"><span class="gly">✕</span>Delete this component</button></div>`;
     props.innerHTML = html;
 
     if (comp.bindProps) comp.bindProps(el, ctx);
@@ -296,8 +298,10 @@
    *  canvas-sized wrapper. */
   function makeDelBtn(el) {
     const b = document.createElement('button');
-    b.type = 'button'; b.className = 'el-del'; b.title = 'Xoá component này';
-    b.textContent = '✕';
+    b.type = 'button'; b.className = 'el-del'; b.title = 'Delete this component';
+    // The ✕ is drawn by .el-del::before so the stylesheet can optically centre it;
+    // title + aria-label carry the name that the glyph no longer does.
+    b.setAttribute('aria-label', 'Delete this component');
     b.addEventListener('click', (e) => { e.stopPropagation(); removeEl(el.id); });
     return b;
   }
@@ -354,7 +358,7 @@
   function reorderImage(el, dir) {
     const i = capture.els.indexOf(el), j = dir === 'up' ? i + 1 : i - 1;
     if (j < 0 || j >= capture.els.length || capture.els[j].type !== 'image') {
-      toast(dir === 'up' ? 'Đã ở trên cùng nhóm ảnh.' : 'Đã ở dưới cùng nhóm ảnh.'); return;
+      toast(dir === 'up' ? 'Already at the top of the image group.' : 'Already at the bottom of the image group.'); return;
     }
     capture.els[i] = capture.els[j]; capture.els[j] = el;
     render();
@@ -362,18 +366,18 @@
 
   function select(id) { selId = id; render(); }
   function removeEl(id) {
-    if (id === BASE_ID) { toast('Không xoá được ảnh nền — nó là khung của bản xuất.'); return; }
+    if (id === BASE_ID) { toast('The base image cannot be deleted — it is the frame of the export.'); return; }
     capture.els = capture.els.filter((e) => e.id !== id);
     if (id === selId) selId = null;
     if (!capture.els.some((e) => e.type === 'stamp')) stampToggle.checked = false;
     render();
   }
   function addElement(type) {
-    if (!capture) { toast('Chưa có ảnh để chú thích — snap hoặc tải ảnh lên trước.'); return; }
+    if (!capture) { toast('No capture to annotate yet — snap or upload an image first.'); return; }
     if (placing) placing.cancel();          // a second palette click always wins over a pending one
     if (type === 'arrow') { startArrowPlacement(); return; }
     const el = newElement(type);
-    if (!el) { toast('Component đó không còn tồn tại.'); SnapKit.lab.renderCustomPalette(); return; }
+    if (!el) { toast('That component no longer exists.'); SnapKit.lab.renderCustomPalette(); return; }
     capture.els.push(el);
     select(el.id);
   }
@@ -393,7 +397,7 @@
    *  shot instead — press marks the tail, drag aims the head, release plants the tip. */
   function startArrowPlacement() {
     stage.classList.add('placing-arrow');
-    toast('Bấm vào điểm bắt đầu, kéo tới điểm cần trỏ rồi thả chuột. Nhấn Esc để huỷ.', 5000);
+    toast('Click the start point, drag to whatever you want to point at, then release. Press Esc to cancel.', 5000);
     const stopWaiting = () => {
       stage.classList.remove('placing-arrow');
       canvas.removeEventListener('pointerdown', begin, true);
@@ -524,7 +528,7 @@
       window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up);
       // A handle drag mutates the model directly and only patches the canvas node
       // (syncNode) as it goes — cheap during the drag, but it leaves any slider that
-      // mirrors the same value (Độ cong góc here, % here for image) stale
+      // mirrors the same value (Corner radius here, % here for image) stale
       // until something else redraws the panel. One refresh once the drag settles.
       renderProps();
     };
@@ -600,8 +604,8 @@
     if (stampToggle.checked) { const s = newElement('stamp'); s.text = SnapKit.contextStamp.stampText(capture); capture.els.push(s); }
     render();
     applyZoom(computeFit());
-    if (view === 'lab') SnapKit.lab.renderLab();   // the "Ảnh đã chụp" ground and the magnifier lens both read `capture`
-    toast(note || 'Đã nhận ảnh chụp.');
+    if (view === 'lab') SnapKit.lab.renderLab();   // the "Your capture" ground and the magnifier lens both read `capture`
+    toast(note || 'Capture loaded.');
   }
 
   // ---- screenshot-canvas ---------------------------------------------------
@@ -636,7 +640,7 @@
     // is now reachable from the base layer's panel rather than only from the empty
     // state — so it has to ask once there is anything to lose.
     if (capture && capture.els.some((el) => el.type !== 'stamp')
-        && !window.confirm('Thay ảnh nền sẽ xoá mọi lớp ảnh và chú thích đang có. Tiếp tục?')) return;
+        && !window.confirm('Replacing the base image clears every image layer and annotation. Continue?')) return;
     const reader = new FileReader();
     reader.onload = () => loadCapture({ id: uid('up_'), dataUrl: reader.result, url: '', rect: null });
     reader.readAsDataURL(f);

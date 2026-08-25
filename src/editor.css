@@ -76,6 +76,13 @@ body.render .stage-wrap { position: fixed; inset: 0; overflow: hidden; padding: 
 body.render .stage-scaler { padding: 0; transform: none !important; display: block; }
 body.render .stage { position: fixed; left: 0; top: 0; box-shadow: none; border-radius: 0; }
 
+/* Covers the swap into/out of body.render above (chrome hidden, zoom reset to natural
+   size) with a quick fade instead of a hard layout cut — export.js fades this in, waits
+   for it to finish, THEN toggles body.render behind it, so the jump never hits the eye. */
+.render-veil { position: fixed; inset: 0; z-index: 1000; background: var(--paper); opacity: 0;
+  pointer-events: none; transition: opacity .12s var(--ease); }
+.render-veil.show { opacity: 1; }
+
 .drop-hint { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
   gap: var(--space-2); text-align: center; padding: var(--space-10); color: var(--ink-2); }
 .drop-hint p { max-width: 340px; margin: 0; font-size: 13.5px; line-height: 1.55; }
@@ -88,7 +95,7 @@ body.render .stage { position: fixed; left: 0; top: 0; box-shadow: none; border-
 
 /* ---- properties panel -------------------------------------------------- */
 .prop-row { margin-bottom: 14px; }
-/* :not(.check-row) — a field's own label (Tiêu đề, Độ phóng đại, ...) sits on its own
+/* :not(.check-row) — a field's own label (Title, Magnification, ...) sits on its own
    line above the input, but .check-row's <label> wraps a toggle switch AND its
    description on one flex row; without the exclusion this rule's `display: block`
    (same specificity as .check-row's `display: flex`, and declared first) would always
@@ -110,8 +117,8 @@ body.render .stage { position: fixed; left: 0; top: 0; box-shadow: none; border-
    built (rowCheck() in editor.js/lab.js, and the two inline checkboxes in lab.js's
    custom-component authoring panel). appearance:none only replaces the native paint;
    the element is still a real checkbox — keyboard toggle, focus and the existing
-   'change' listeners (ctx.flag()) all keep working unchanged. The topbar's Khung
-   ảnh/Context stamp switches use the separate .stamp-toggle class on purpose — those
+   'change' listeners (ctx.flag()) all keep working unchanged. The topbar's Image
+   frame/Context stamp switches use the separate .stamp-toggle class on purpose — those
    are page-level view toggles, not a component's own settings. */
 .check-row input[type="checkbox"] { appearance: none; -webkit-appearance: none; margin: 0; flex: none;
   width: 34px; height: 20px; border-radius: var(--radius-full); border: none; position: relative;
@@ -123,9 +130,27 @@ body.render .stage { position: fixed; left: 0; top: 0; box-shadow: none; border-
 .check-row input[type="checkbox"]:checked::before { transform: translateX(14px); }
 .check-row input[type="checkbox"]:focus-visible { outline: 2px solid var(--accent-line); outline-offset: 2px; }
 .check-row input[type="checkbox"]:disabled { opacity: .5; cursor: not-allowed; }
-.del-row { margin-top: var(--space-1); }
-.del-row .btn { width: 100%; color: var(--down); border-color: var(--down); }
-.del-row .btn:hover { background: var(--down); color: var(--color-neutral-0); }
+/* The panel's destructive footer — "Delete this component" (Properties) and
+   "Delete from the library" (Components tab). Both used to sit 4px under the last
+   control, which put a delete flush against the very setting it throws away and,
+   in the Lab panel, made the gap ABOVE Delete smaller than the one above Copy —
+   the loudest button in the panel reading as the tightest-bound. The hairline plus
+   a --space-4 gap gives it its own footer band instead, and it keeps the full
+   width and left edge of every input above it so the panel still ends on one
+   clean column.
+
+   Quiet by default: an always-on red outline is a warning the user hasn't
+   triggered yet, and after a few minutes it just reads as decoration. The button
+   states its intent in red text on the panel's own border, and commits to solid
+   red only once the pointer is actually on it. NOT for "Replace base image…" —
+   that one is not destructive and uses .btn.block. */
+.del-row { margin-top: var(--space-4); padding-top: var(--space-3); border-top: 1px solid var(--line); }
+.del-row .btn { display: flex; align-items: center; justify-content: center; gap: var(--space-2);
+  width: 100%; color: var(--down); border-color: var(--line-2); }
+.del-row .btn .gly { font-size: var(--text-sm); line-height: 1; opacity: .75; }
+.del-row .btn:hover { background: var(--down); border-color: var(--down); color: var(--color-neutral-0); }
+.del-row .btn:hover .gly { opacity: 1; }
+.del-row .btn:focus-visible { outline: 2px solid var(--down); outline-offset: 2px; }
 
 .toast { position: fixed; left: 50%; bottom: 26px; transform: translate(-50%, 12px); background: var(--ink); color: var(--color-neutral-0);
   font-size: 12.5px; font-weight: var(--weight-semibold); padding: 9px var(--space-4); border-radius: var(--radius-full); opacity: 0; pointer-events: none;
@@ -268,9 +293,4 @@ body.render .lab, body.render .viewtabs { display: none !important; }
 .kit-doc[open] summary::before { content: "▾  "; }
 .kit-doc summary:hover { color: var(--ink); }
 .kit-doc p { font-size: var(--text-xs); line-height: 1.6; color: var(--ink-2); margin: var(--space-2) 0 0; }
-.kit-doc ul { margin: var(--space-2) 0 0; padding-left: 15px; }
-.kit-doc li { font-size: var(--text-xs); line-height: 1.55; color: var(--ink-2); margin-top: var(--space-2); }
-.var-list { display: flex; flex-wrap: wrap; gap: 5px; }
-.var-list code { font-family: var(--mono); font-size: 10.5px; background: var(--paper);
-  border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 2px 5px; color: var(--ink-2); }
 .pal-btn small { font-weight: var(--weight-medium); font-size: 10.5px; color: var(--muted); margin-left: 3px; }

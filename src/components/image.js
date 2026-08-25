@@ -11,7 +11,7 @@
   window.SnapKit.components.image = {
     type: 'image',
     catalogId: null,
-    layerLabel: 'Ảnh',
+    layerLabel: 'Image',
     glyph: '🖼️',
     addable: false,
     isBox: true,
@@ -43,20 +43,20 @@
 
     propsHtml(el, ctx) {
       const pct = Math.round((el.w / el.natW) * 100);
-      return `<p class="empty-hint" style="margin:0 0 14px">Ảnh dán từ clipboard, nằm trên ảnh nền như một lớp riêng.</p>`
-        + `<div class="prop-row"><label id="pScaleLabel">Kích thước — ${pct}% (${el.w}×${el.h})</label>`
+      return `<p class="empty-hint" style="margin:0 0 14px">An image pasted from the clipboard, sitting on the base image as its own layer.</p>`
+        + `<div class="prop-row"><label id="pScaleLabel">Size — ${pct}% (${el.w}×${el.h})</label>`
         + `<input type="range" id="pScale" min="10" max="200" step="1" value="${pct}" style="width:100%"></div>`
-        + ctx.rowCheck('pFrame', 'Khung bo góc + đổ bóng', el.frame)
-        + `<div class="prop-row"><label>Thứ tự trong nhóm ảnh</label><div class="seg" id="pOrder">`
-        + `<button data-v="down">↓ Xuống dưới</button><button data-v="up">↑ Lên trên</button></div></div>`
-        + ctx.note('Kéo để di chuyển, kéo góc dưới-phải để đổi cỡ — luôn giữ đúng tỉ lệ, vì ảnh chụp bị kéo méo là lỗi chứ không phải một kiểu trình bày. Ảnh dán thêm luôn nằm dưới mọi chú thích, để callout và mũi tên đã đặt không bị lớp mới che. Zoom / Magnify chỉ phóng pixel của ảnh nền, không phóng lớp này.');
+        + ctx.rowCheck('pFrame', 'Rounded frame + shadow', el.frame)
+        + `<div class="prop-row"><label>Order within the image group</label><div class="seg" id="pOrder">`
+        + `<button data-v="down">↓ Send down</button><button data-v="up">↑ Bring up</button></div></div>`
+        + ctx.note('Drag to move, drag the bottom-right corner to resize — always at the right aspect ratio, because a stretched screenshot is a bug, not a way of presenting it. A pasted image always sits under every annotation, so callouts and arrows already in place are never covered by a new layer. Zoom / Magnify only magnifies pixels of the base image, never this layer.');
     },
 
     bindProps(el, ctx) {
       ctx.on('#pScale', 'input', (e) => {
         const p = +e.target.value / 100;
         el.w = Math.max(24, Math.round(el.natW * p)); el.h = Math.max(1, Math.round(el.natH * p));
-        ctx.syncNode(el); ctx.$('#pScaleLabel').textContent = `Kích thước — ${e.target.value}% (${el.w}×${el.h})`;
+        ctx.syncNode(el); ctx.$('#pScaleLabel').textContent = `Size — ${e.target.value}% (${el.w}×${el.h})`;
       });
       ctx.flag('#pFrame', 'frame');
       const ord = ctx.$('#pOrder');

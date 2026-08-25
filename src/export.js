@@ -26,7 +26,14 @@
       return new Blob([arr], { type: mime });
     }
 
+    // body.render (below) swaps the whole layout to a chrome-less, un-zoomed, natural-size
+    // stage — the only way to get a pixel-accurate compositor screenshot — which is a hard
+    // visual cut if it lands on an unveiled screen. The veil fades in first and eats that
+    // cut, then fades back out once the normal layout has repainted behind it.
     async function renderToPngDataUrl() {
+      const veil = $('#renderVeil');
+      veil.classList.add('show');
+      await new Promise((r) => setTimeout(r, 130));   // let the veil's own fade-in finish
       document.body.classList.add('render');
       // two rAFs: one to flush the class toggle, one more so backdrop-filter has
       // actually painted before the compositor screenshot fires
@@ -34,7 +41,12 @@
       if (document.fonts && document.fonts.ready) { try { await document.fonts.ready; } catch (e) {} }
       let res;
       try { res = hasExt ? await chrome.runtime.sendMessage({ type: 'capture-for-export' }) : { error: 'not running as an extension' }; }
-      finally { document.body.classList.remove('render'); }
+      finally {
+        document.body.classList.remove('render');
+        // one more frame so the restored layout is painted behind the veil before it lifts
+        await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+        veil.classList.remove('show');
+      }
       if (!res || res.error) throw new Error((res && res.error) || 'capture failed');
       const dpr = window.devicePixelRatio || 1;
       // Measure the stage rather than the image: with the screenshot-canvas on, the
@@ -43,7 +55,7 @@
       const wantW = Math.round(box.width * dpr), wantH = Math.round(box.height * dpr);
       const availW = Math.round(document.documentElement.clientWidth * dpr), availH = Math.round(document.documentElement.clientHeight * dpr);
       if (wantW > availW || wantH > availH) {
-        toast(`Cửa sổ trình duyệt nhỏ hơn bản export (${Math.round(box.width)}×${Math.round(box.height)}px) — ảnh bị cắt bớt. Phóng to cửa sổ rồi Export lại để lấy đủ khung hình.`, 5000);
+        toast(`Browser window is smaller than the export (${Math.round(box.width)}×${Math.round(box.height)}px) — the image gets cropped. Enlarge the window, then export again for the full frame.`, 5000);
       }
       return cropDataUrl(res.dataUrl, 0, 0, Math.min(wantW, availW), Math.min(wantH, availH));
     }
@@ -57,12 +69,12 @@
     }
 
     $('#downloadPng').addEventListener('click', async () => {
-      if (!getCapture()) return toast('Chưa có ảnh để export.');
+      if (!getCapture()) return toast('Nothing to export yet.');
       try {
         const dataUrl = await renderToPngDataUrl();
         const a = document.createElement('a'); a.href = dataUrl; a.download = fileSlug() + '.png'; a.click();
-        toast('Đã export PNG.');
-      } catch (e) { toast('Export lỗi: ' + e.message); }
+        toast('PNG exported.');
+      } catch (e) { toast('Export failed: ' + e.message); }
     });
 
     // One copy in flight at a time. renderToPngDataUrl() strips the editor chrome
@@ -71,24 +83,18 @@
     // toolbar. Easy to hit now that a held Ctrl+C can fire this.
     let copying = false;
     async function copyImage() {
-      if (!getCapture()) return toast('Chưa có ảnh để copy.');
+      if (!getCapture()) return toast('Nothing to copy yet.');
       if (copying) return;
       copying = true;
       try {
         const dataUrl = await renderToPngDataUrl();
         const blob = dataUrlToBlob(dataUrl);
         await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
-        toast('Đã copy ảnh vào clipboard — dán thẳng vào ticket.');
-      } catch (e) { toast('Copy lỗi: ' + e.message); }
+        toast('Image copied to the clipboard — paste it straight into the ticket.');
+      } catch (e) { toast('Copy failed: ' + e.message); }
       finally { copying = false; }
     }
-    async function copyContext() {
-      if (!getCapture()) return toast('Chưa có ảnh — chưa có ngữ cảnh để copy.');
-      try { await navigator.clipboard.writeText(window.SnapKit.contextStamp.contextText(getCapture())); toast('Đã copy thông tin ngữ cảnh.'); }
-      catch (e) { toast('Copy lỗi: ' + e.message); }
-    }
     $('#copyImg').addEventListener('click', copyImage);
-    $('#copyCtx').addEventListener('click', copyContext);
 
     // Ctrl/⌘+C copies the annotated shot. Stands down whenever the keystroke
     // plausibly belongs to something else: a focused text field, or a live text
@@ -121,7 +127,7 @@
       const dataUrl = await readAsDataUrl(file);
       const capture = getCapture();
       if (!capture) {
-        await loadCapture({ id: 'paste_' + Math.random().toString(36).slice(2, 8), dataUrl, url: '', rect: null, note: 'Đã dán ảnh từ clipboard.' });
+        await loadCapture({ id: 'paste_' + Math.random().toString(36).slice(2, 8), dataUrl, url: '', rect: null, note: 'Pasted the image from the clipboard.' });
         return;
       }
       const img = await loadImage(dataUrl);
@@ -131,7 +137,7 @@
       const last = capture.els.map((x) => x.type).lastIndexOf('image');
       capture.els.splice(last + 1, 0, el);
       select(el.id);
-      toast(`Đã dán thành lớp ảnh mới (${img.naturalWidth}×${img.naturalHeight}).`);
+      toast(`Pasted as a new image layer (${img.naturalWidth}×${img.naturalHeight}).`);
     }
 
     document.addEventListener('paste', (e) => {
@@ -149,7 +155,7 @@
       (async () => {
         for (const f of files) {
           try { await pasteImageFile(f); }
-          catch (err) { toast('Không đọc được ảnh trong clipboard.'); break; }
+          catch (err) { toast('Could not read the image on the clipboard.'); break; }
         }
       })();
     });

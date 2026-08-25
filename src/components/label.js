@@ -22,20 +22,20 @@
     type: 'label',
     catalogId: null,
     glyph: '🏷️',
-    layerLabel: 'Nhãn',
+    layerLabel: 'Label',
     addable: true,
     isBox: false,
 
     defaults(c) {
-      return { x: c.x, y: c.y, text: 'Nhãn', accent: false };
+      return { x: c.x, y: c.y, text: 'Label', accent: false };
     },
 
     inner,
     style,
 
     propsHtml(el, ctx) {
-      return ctx.rowInput('pText', 'Nội dung', el.text) + ctx.rowCheck('pAccent', 'Màu accent', el.accent)
-        + ctx.note('Không phải component của kit — Snap Studio tự thêm, vì kit không có nhãn nhỏ nào và dấu ngữ cảnh cần một cái.');
+      return ctx.rowInput('pText', 'Content', el.text) + ctx.rowCheck('pAccent', 'Accent colour', el.accent)
+        + ctx.note('Not a kit component — Snap Studio adds it, because the kit has no small label of any kind and the context stamp needs one.');
     },
 
     bindProps(el, ctx) {
@@ -61,7 +61,7 @@
     style,
 
     propsHtml(el, ctx) {
-      return ctx.rowText('pText', 'Nội dung', el.text, 2);
+      return ctx.rowText('pText', 'Content', el.text, 2);
     },
 
     bindProps(el, ctx) {

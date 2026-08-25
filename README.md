@@ -29,14 +29,14 @@ deliberate cut, not an oversight — see "What this is NOT" below.
    stage the first paste becomes the shot; after that each paste **adds an image layer**
    you can drag, resize (aspect always locked) and stack — two shots in one frame for a
    before/after, or a zoomed detail beside the whole page. Nothing is ever replaced by a
-   paste; **Thay ảnh nền…** in the base layer's panel is the deliberate start-over.
+   paste; **Replace base image…** in the base layer's panel is the deliberate start-over.
 6. **Layers** in the left rail lists everything in paint order, starting with the shot
-   itself (**Ảnh nền** — selectable, not deletable, since it sets the exported frame).
+   itself (**Base image** — selectable, not deletable, since it sets the exported frame).
    Pasted images always sit below the annotations so a new one can't bury a text-box or
    highlight you already placed.
 7. The **Components** tab (topbar, next to **Snap**) is the kit itself: every component on
-   a light ground, a dark ground, or your live capture — and **+ Component mới** to author
-   a new one. Anything you make there shows up in the Snap rail under **Của bạn**.
+   a light ground, a dark ground, or your live capture — and **+ New component** to author
+   a new one. Anything you make there shows up in the Snap rail under **Yours**.
 
 ## How export actually works (read this before debugging a blank/cut-off PNG)
 
@@ -129,7 +129,7 @@ back on the end. An edit made above the banner is lost the next time anyone does
 | `.cmp-connector` | — | dropped; the anchor-dot convention now lives on the arrow, and text-box / zoom-magnify carry their own `__connector` parts |
 | `.cmp-pill` | `.cmp-label` | not a kit component any more — Snap Studio's own, in `EXTRAS`, because the context stamp needs a chip and the kit has no small-label primitive |
 | — | `.cmp-spotlight-cutout` | **new**: dims the whole frame, leaves one region lit |
-| — | `.cmp-screenshot-canvas` | **new**: the padded ground + rounded frame, on by default via the **Khung ảnh** toggle |
+| — | `.cmp-screenshot-canvas` | **new**: the padded ground + rounded frame, on by default via the **Image frame** toggle |
 
 ## Not yet wired up
 

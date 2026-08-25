@@ -28,9 +28,9 @@
     },
 
     propsHtml(el, ctx) {
-      return ctx.rowCheck('pCompact', 'Rút gọn — số trần trong vòng tròn', el.compact)
-        + ctx.rowCheck('pVideo', 'Cỡ cho video (32px)', el.video)
-        + ctx.note('Nhãn luôn là “Step {n}”, không bao giờ là số trần — số trần đọc lệch ngay khi ảnh bị tách khỏi ngữ cảnh. Rút gọn là lối thoát cho chỗ thật sự chật, không phải mặc định.');
+      return ctx.rowCheck('pCompact', 'Compact — bare number in the circle', el.compact)
+        + ctx.rowCheck('pVideo', 'Video size (32px)', el.video)
+        + ctx.note('The label is always “Step {n}”, never a bare number — a bare number reads wrong the moment the shot is pulled out of its context. Compact is the escape hatch for genuinely tight spots, not the default.');
     },
 
     bindProps(el, ctx) {
@@ -49,7 +49,7 @@
     },
 
     labPropsHtml(v, ctx) {
-      return ctx.rowCheck('kCompact', 'Rút gọn (số trần)', v.compact) + ctx.rowCheck('kVideo', 'Cỡ video (32px)', v.video);
+      return ctx.rowCheck('kCompact', 'Compact (bare number)', v.compact) + ctx.rowCheck('kVideo', 'Video size (32px)', v.video);
     },
 
     labBindProps(v, ctx) {

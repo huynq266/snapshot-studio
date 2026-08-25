@@ -1,6 +1,5 @@
 /* Context stamp — browser · OS · image size · URL · time, rendered as a
-   .cmp-label element (see components/label.js's "stamp" registration) and
-   as the plain-text block the "Copy context" button puts on the clipboard.
+   .cmp-label element (see components/label.js's "stamp" registration).
    Pure text/parsing helpers, no DOM state of their own — callers hand in
    whichever `capture` they mean. */
 (() => {
@@ -32,19 +31,9 @@
 
   function stampText(capture) {
     const { browser, v, os } = parseUA();
-    const t = capture.capturedAt.toLocaleString('vi-VN', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' });
+    const t = capture.capturedAt.toLocaleString('en-GB', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' });
     return [`${browser} ${v}`, os, `${capture.img.w}×${capture.img.h}`, hostPath(capture.url), t].filter(Boolean).join(' · ');
   }
 
-  function contextText(capture) {
-    const { browser, v, os } = parseUA();
-    return [
-      `Trình duyệt: ${browser} ${v}`, `Hệ điều hành: ${os}`,
-      `Kích thước ảnh: ${capture.img.w}×${capture.img.h}px`,
-      `URL: ${capture.url || '(tải lên thủ công, không có URL)'}`,
-      `Thời điểm chụp: ${capture.capturedAt.toLocaleString('vi-VN')}`,
-    ].join('\n');
-  }
-
-  window.SnapKit.contextStamp = { parseUA, hostPath, stampText, contextText };
+  window.SnapKit.contextStamp = { parseUA, hostPath, stampText };
 })();

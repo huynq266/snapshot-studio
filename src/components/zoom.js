@@ -77,26 +77,26 @@
       const maxR = Math.max(1, Math.round(minSide(el) / 2));
       const radius = Math.min(el.radius != null ? el.radius : 22, maxR);
       const borderW = el.borderWidth != null ? el.borderWidth : 2;
-      let html = `<div class="prop-row"><label id="pZoomLabel">Độ phóng đại — ${el.zoom.toFixed(1)}×</label><input type="range" id="pZoom" min="1.1" max="4" step="0.1" value="${el.zoom}" style="width:100%"></div>`
-        + ctx.rowSeg('pZoomShape', 'Hình dạng', [['rect', 'Chữ nhật bo góc'], ['circle', 'Hình tròn']], shape);
+      let html = `<div class="prop-row"><label id="pZoomLabel">Magnification — ${el.zoom.toFixed(1)}×</label><input type="range" id="pZoom" min="1.1" max="4" step="0.1" value="${el.zoom}" style="width:100%"></div>`
+        + ctx.rowSeg('pZoomShape', 'Shape', [['rect', 'Rounded rectangle'], ['circle', 'Circle']], shape);
       if (shape === 'rect') {
-        html += `<div class="prop-row"><label id="pRadiusLabel">Độ cong góc — ${Math.round(radius)}px</label><input type="range" id="pRadius" min="0" max="${maxR}" step="1" value="${Math.round(radius)}" style="width:100%"></div>`;
+        html += `<div class="prop-row"><label id="pRadiusLabel">Corner radius — ${Math.round(radius)}px</label><input type="range" id="pRadius" min="0" max="${maxR}" step="1" value="${Math.round(radius)}" style="width:100%"></div>`;
       }
-      html += ctx.rowCheck('pDark', 'Ảnh bên dưới tối màu — thêm viền trắng', el.dark)
-        + ctx.rowCheck('pBorder', 'Viền accent quanh khung kính', el.border);
+      html += ctx.rowCheck('pDark', 'Dark shot underneath — add a white ring', el.dark)
+        + ctx.rowCheck('pBorder', 'Accent border around the glass frame', el.border);
       if (el.border) {
-        html += `<div class="prop-row"><label id="pBorderWLabel">Độ dày viền — ${borderW}px</label><input type="range" id="pBorderW" min="1" max="6" step="1" value="${borderW}" style="width:100%"></div>`;
+        html += `<div class="prop-row"><label id="pBorderWLabel">Border width — ${borderW}px</label><input type="range" id="pBorderW" min="1" max="6" step="1" value="${borderW}" style="width:100%"></div>`;
       }
-      html += ctx.note('Kéo góc dưới-phải để đổi kích thước — ở dạng chữ nhật bo góc kéo tự do theo cả hai chiều, ở dạng tròn luôn giữ đúng tỉ lệ để còn là hình tròn. Kéo tay cầm tròn ở góc trên-trái để chỉnh độ cong trực tiếp (ẩn khi đã chọn Hình tròn). Hình tròn và viền accent là hai biến thể riêng của Snap Studio — bản gốc trong kit chỉ có hình chữ nhật bo góc, không viền.');
+      html += ctx.note('Drag the bottom-right corner to resize — in rounded-rectangle form it resizes freely on both axes, in circle form it keeps its aspect ratio so it stays a circle. Drag the round handle at the top-left corner to set the corner radius directly (hidden once Circle is picked). Circle and the accent border are two Snap Studio variants of their own — the kit original only has the rounded rectangle, with no border.');
       return html;
     },
 
     bindProps(el, ctx) {
       ctx.flag('#pDark', 'dark');
       ctx.flag('#pBorder', 'border', true);
-      ctx.on('#pZoom', 'input', (e) => { el.zoom = +e.target.value; ctx.syncNode(el); ctx.$('#pZoomLabel').textContent = `Độ phóng đại — ${el.zoom.toFixed(1)}×`; });
-      ctx.on('#pRadius', 'input', (e) => { el.radius = +e.target.value; ctx.syncNode(el); ctx.$('#pRadiusLabel').textContent = `Độ cong góc — ${el.radius}px`; });
-      ctx.on('#pBorderW', 'input', (e) => { el.borderWidth = +e.target.value; ctx.syncNode(el); ctx.$('#pBorderWLabel').textContent = `Độ dày viền — ${el.borderWidth}px`; });
+      ctx.on('#pZoom', 'input', (e) => { el.zoom = +e.target.value; ctx.syncNode(el); ctx.$('#pZoomLabel').textContent = `Magnification — ${el.zoom.toFixed(1)}×`; });
+      ctx.on('#pRadius', 'input', (e) => { el.radius = +e.target.value; ctx.syncNode(el); ctx.$('#pRadiusLabel').textContent = `Corner radius — ${el.radius}px`; });
+      ctx.on('#pBorderW', 'input', (e) => { el.borderWidth = +e.target.value; ctx.syncNode(el); ctx.$('#pBorderWLabel').textContent = `Border width — ${el.borderWidth}px`; });
       // Not the generic seg() other components use: switching into circle shape also
       // has to square up w/h (shrinking to the smaller side) or border-radius:50% on a
       // non-square box paints an ellipse, not the circle the button promises.
@@ -119,17 +119,17 @@
         ? content({ x: Math.round(ctx.capture.img.w / 2), y: Math.round(ctx.capture.img.h / 2), w: 198, h: 198, zoom: v.zoom }, ctx.capture)
         : `<div class="cmp-zoom-magnify__content" style="width:210px;height:104px;display:grid;place-items:center;`
           + `border-radius:var(--radius-md);background:var(--color-neutral-100);font-family:var(--font-sans);`
-          + `font-size:var(--text-sm);font-weight:var(--weight-semibold);color:var(--color-neutral-500)">Chưa có ảnh để phóng to</div>`;
+          + `font-size:var(--text-sm);font-weight:var(--weight-semibold);color:var(--color-neutral-500)">No capture to magnify yet</div>`;
       return `<div class="cmp-zoom-magnify${v.dark ? ' on-dark' : ''}">${inner}</div>`;
     },
 
     labPropsHtml(v, ctx) {
-      return `<div class="prop-row"><label id="kZoomLabel">Độ phóng đại — ${v.zoom.toFixed(1)}×</label><input type="range" id="kZoom" min="1.1" max="4" step="0.1" value="${v.zoom}" style="width:100%"></div>`
-        + ctx.rowCheck('kDark', 'Viền trắng cho nền tối (on-dark)', v.dark);
+      return `<div class="prop-row"><label id="kZoomLabel">Magnification — ${v.zoom.toFixed(1)}×</label><input type="range" id="kZoom" min="1.1" max="4" step="0.1" value="${v.zoom}" style="width:100%"></div>`
+        + ctx.rowCheck('kDark', 'White ring for dark ground (Dark mode)', v.dark);
     },
 
     labBindProps(v, ctx) {
-      ctx.on('#kZoom', 'input', (e) => { v.zoom = +e.target.value; ctx.$('#kZoomLabel').textContent = `Độ phóng đại — ${v.zoom.toFixed(1)}×`; ctx.renderSpecimen(); });
+      ctx.on('#kZoom', 'input', (e) => { v.zoom = +e.target.value; ctx.$('#kZoomLabel').textContent = `Magnification — ${v.zoom.toFixed(1)}×`; ctx.renderSpecimen(); });
       ctx.flag('#kDark', 'dark');
     },
   };

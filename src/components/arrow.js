@@ -136,20 +136,20 @@
 
     propsHtml(el, ctx) {
       const scale = el.scale != null ? el.scale : 1;
-      let html = ctx.rowSeg('pShape', 'Đường đi', [['straight', 'Thẳng'], ['curved', 'Cong'], ['elbow', 'Gập góc']], el.shape);
-      html += `<div class="prop-row"><label id="pArrowScaleLabel">Kích thước — ${scale.toFixed(1)}×</label><input type="range" id="pArrowScale" min="0.5" max="3" step="0.1" value="${scale}" style="width:100%"></div>`;
-      html += ctx.rowCheck('pOrigin', 'Chấm neo ở gốc mũi tên', el.origin)
-        + ctx.rowCheck('pHideHead', 'Ẩn đầu mũi tên — chỉ hiện đường', el.hideHead)
-        + ctx.note('Gập góc khi hai đầu thẳng hàng theo trục; cong khi thật sự không thẳng hàng. Đường chéo giữa hai điểm thẳng hàng trông tuỳ tiện, gập góc giữa hai điểm lệch trục trông như hỏng. Kéo 1 trong 2 đầu để dời điểm neo.'
-          + (el.shape === 'curved' ? ' Kéo bất kỳ đâu trên thân mũi tên để chỉnh độ cong.' : '')
-          + (el.shape === 'elbow' ? ' Kéo điểm ở góc vuông để đổi chiều gập.' : ''));
+      let html = ctx.rowSeg('pShape', 'Path', [['straight', 'Straight'], ['curved', 'Curved'], ['elbow', 'Elbow']], el.shape);
+      html += `<div class="prop-row"><label id="pArrowScaleLabel">Size — ${scale.toFixed(1)}×</label><input type="range" id="pArrowScale" min="0.5" max="3" step="0.1" value="${scale}" style="width:100%"></div>`;
+      html += ctx.rowCheck('pOrigin', 'Anchor dot at the tail', el.origin)
+        + ctx.rowCheck('pHideHead', 'Hide the arrowhead — line only', el.hideHead)
+        + ctx.note('Elbow when the two ends line up on an axis; curved when they genuinely do not. A diagonal between two aligned points looks careless, and an elbow between two off-axis points looks broken. Drag either end to move its anchor point.'
+          + (el.shape === 'curved' ? ' Drag anywhere along the arrow body to adjust the curve.' : '')
+          + (el.shape === 'elbow' ? ' Drag the right-angle point to flip which way it bends.' : ''));
       return html;
     },
 
     bindProps(el, ctx) {
       ctx.flag('#pOrigin', 'origin');
       ctx.flag('#pHideHead', 'hideHead');
-      ctx.on('#pArrowScale', 'input', (e) => { el.scale = +e.target.value; ctx.syncNode(el); ctx.$('#pArrowScaleLabel').textContent = `Kích thước — ${el.scale.toFixed(1)}×`; });
+      ctx.on('#pArrowScale', 'input', (e) => { el.scale = +e.target.value; ctx.syncNode(el); ctx.$('#pArrowScaleLabel').textContent = `Size — ${el.scale.toFixed(1)}×`; });
       ctx.seg('#pShape', 'shape', true, true);
     },
 
@@ -167,9 +167,9 @@
     },
 
     labPropsHtml(v, ctx) {
-      let html = ctx.rowSeg('kShape', 'Đường đi', [['straight', 'Thẳng'], ['curved', 'Cong'], ['elbow', 'Gập']], v.shape);
-      if (v.shape === 'elbow') html += ctx.rowSeg('kElbow', 'Thứ tự gập', [['h-then-v', 'Ngang → dọc'], ['v-then-h', 'Dọc → ngang']], v.elbow);
-      html += ctx.rowCheck('kSecondary', 'Mức phụ (--secondary)', v.secondary) + ctx.rowCheck('kOrigin', 'Chấm neo ở gốc', v.origin);
+      let html = ctx.rowSeg('kShape', 'Path', [['straight', 'Straight'], ['curved', 'Curved'], ['elbow', 'Elbow']], v.shape);
+      if (v.shape === 'elbow') html += ctx.rowSeg('kElbow', 'Elbow order', [['h-then-v', 'Across → down'], ['v-then-h', 'Down → across']], v.elbow);
+      html += ctx.rowCheck('kSecondary', 'Secondary colour', v.secondary) + ctx.rowCheck('kOrigin', 'Anchor dot at the tail', v.origin);
       return html;
     },
 

@@ -54,7 +54,7 @@
 
   /** The rail's kit list, in catalog order, joined to the per-component registrations'
    *  own UI facts (components/*.js). Nothing is retyped from the catalog here — name,
-   *  summary, use_when, variants and gotchas are all read straight off the vendored
+   *  summary, use_when and variants are all read straight off the vendored
    *  mirror, so the Components tab documents whatever the kit actually says today. */
   const CAT = (window.KIT_CATALOG && window.KIT_CATALOG.components) || [];
   const compByCatalogId = (id) => Object.values(window.SnapKit.components || {}).find((c) => c.catalogId === id) || null;
@@ -166,7 +166,7 @@
     if (outerFence) md = outerFence[1].trim();
 
     const fm = md.match(/---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*\r?\n?/);
-    if (!fm) throw new Error('Không thấy khối frontmatter (--- ... ---) trong file.');
+    if (!fm) throw new Error('No frontmatter block (--- ... ---) in the file.');
     const fields = {};
     fm[1].split(/\r?\n/).forEach((line) => {
       const m = line.match(/^([a-zA-Z]+)\s*:\s*(.*)$/);
@@ -175,10 +175,10 @@
 
     const blocks = [...md.slice(fm.index + fm[0].length).matchAll(/```css\b[^\n]*\r?\n([\s\S]*?)```/g)]
       .map((m) => m[1].replace(/\s+$/, ''));
-    if (!blocks.length) throw new Error('Không thấy khối ```css nào trong file.');
+    if (!blocks.length) throw new Error('No ```css block in the file.');
 
     return {
-      name: (fields.name || 'Component mới').slice(0, 60),
+      name: (fields.name || 'New component').slice(0, 60),
       sizing: fields.sizing === 'box' ? 'box' : 'auto',
       w: Math.max(20, parseInt(fields.width, 10) || 200),
       h: Math.max(20, parseInt(fields.height, 10) || 110),
@@ -235,21 +235,21 @@
   function lintCss(css) {
     const out = [];
     if (/\b(rotate[XYZ]|rotate3d|translateZ|translate3d|perspective|matrix3d)\s*\(/i.test(css)) {
-      out.push({ lvl: 'bad', msg: 'Transform 3D làm Chrome âm thầm bỏ backdrop-filter — kính sẽ thành thẻ đục, không báo lỗi gì. Bỏ rotateX/Y/Z, translateZ, perspective.' });
+      out.push({ lvl: 'bad', msg: 'A 3D transform makes Chrome silently drop backdrop-filter — the glass turns into a flat card, with no error anywhere. Remove rotateX/Y/Z, translateZ, perspective.' });
     }
 
     const hex = [...new Set((css.match(/#[0-9a-fA-F]{3,8}\b/g) || []).filter((h) => !/^#(fff|ffffff|000|000000)$/i.test(h)))];
     if (hex.length) {
-      out.push({ lvl: 'warn', msg: `Màu hex cứng: ${hex.join(', ')}. Dùng var(--color-*) / var(--accent*) hoặc rgba(var(--color-*-rgb),α) để lần rebrand sau không sót chỗ này.` });
+      out.push({ lvl: 'warn', msg: `Hardcoded hex colour: ${hex.join(', ')}. Use var(--color-*) / var(--accent*) or rgba(var(--color-*-rgb), α) so the next rebrand does not miss this spot.` });
     }
     const rgbLiteral = [...new Set((css.match(/rgba?\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}/g) || []))]
       .filter((s) => !/\((255,255,255|0,0,0)$/.test(s.replace(/\s+/g, '')));
     if (rgbLiteral.length) {
-      out.push({ lvl: 'warn', msg: `rgb()/rgba() với số cứng thay vì token: ${rgbLiteral.join(', ')}… Cùng vấn đề với màu hex ở trên, chỉ khác cách viết — dùng rgba(var(--color-*-rgb), α) hoặc rgba(var(--accent-rgb), α).` });
+      out.push({ lvl: 'warn', msg: `rgb()/rgba() with raw numbers instead of a token: ${rgbLiteral.join(', ')}… Same problem as the hex colours above, only written differently — use rgba(var(--color-*-rgb), α) or rgba(var(--accent-rgb), α).` });
     }
 
     if (/[^-]backdrop-filter/.test('\n' + css) && !/-webkit-backdrop-filter/.test(css)) {
-      out.push({ lvl: 'warn', msg: 'Có backdrop-filter nhưng thiếu -webkit-backdrop-filter đi kèm.' });
+      out.push({ lvl: 'warn', msg: 'backdrop-filter is here but the -webkit-backdrop-filter alongside it is missing.' });
     }
 
     const spaceHits = new Map(), radiusHits = new Map(), textHits = new Map(), weightHits = new Set();
@@ -278,19 +278,19 @@
       }
     }
     if (spaceHits.size) {
-      out.push({ lvl: 'warn', msg: `Khoảng cách cứng trùng scale sẵn có: ${[...spaceHits].map(([n, t]) => `${n}px→var(${t})`).join(', ')}.` });
+      out.push({ lvl: 'warn', msg: `Hardcoded spacing matching an existing scale step: ${[...spaceHits].map(([n, t]) => `${n}px→var(${t})`).join(', ')}.` });
     }
     if (radiusHits.size) {
-      out.push({ lvl: 'warn', msg: `Bo góc cứng trùng scale sẵn có: ${[...radiusHits].map(([n, t]) => `${n}px→var(${t})`).join(', ')}.` });
+      out.push({ lvl: 'warn', msg: `Hardcoded radius matching an existing scale step: ${[...radiusHits].map(([n, t]) => `${n}px→var(${t})`).join(', ')}.` });
     }
     if (textHits.size) {
-      out.push({ lvl: 'warn', msg: `Cỡ chữ cứng trùng scale sẵn có: ${[...textHits].map(([n, t]) => `${n}px→var(${t})`).join(', ')}.` });
+      out.push({ lvl: 'warn', msg: `Hardcoded font-size matching an existing scale step: ${[...textHits].map(([n, t]) => `${n}px→var(${t})`).join(', ')}.` });
     }
     if (weightHits.size) {
-      out.push({ lvl: 'warn', msg: `font-weight số cứng trùng token sẵn có: ${[...weightHits].join(', ')}.` });
+      out.push({ lvl: 'warn', msg: `Numeric font-weight matching an existing token: ${[...weightHits].join(', ')}.` });
     }
     if (fontFamilyLiteral) {
-      out.push({ lvl: 'warn', msg: 'font-family viết tay thay vì var(--font-sans) / var(--mono) — đổi font hệ thống sau này sẽ không theo kịp.' });
+      out.push({ lvl: 'warn', msg: 'Hand-typed font-family instead of var(--font-sans) / var(--mono) — a later system-font change will not follow along.' });
     }
     return out;
   }
@@ -327,10 +327,10 @@
     async function createCustomFromMd(file) {
       let text;
       try { text = await file.text(); }
-      catch (e) { toast('Không đọc được file.'); return; }
+      catch (e) { toast('Could not read the file.'); return; }
       let parsed;
       try { parsed = parseComponentMd(text); }
-      catch (e) { toast('File .md không đúng định dạng: ' + e.message, 5000); return; }
+      catch (e) { toast('That .md file is not in the expected format: ' + e.message, 5000); return; }
       const def = { id: 'c_' + Math.random().toString(36).slice(2, 8), name: parsed.name,
         slug: uniqueSlug(slugify(parsed.name)), sizing: parsed.sizing, w: parsed.w, h: parsed.h,
         text: parsed.text, css: parsed.css, darkCss: parsed.darkCss };
@@ -338,13 +338,13 @@
       labSel = { kind: 'custom', id: def.id };
       customDark = false;
       applyCustomCss(); persistCustoms(); renderCustomPalette(); renderLab();
-      toast(`Đã nhập "${def.name}" từ file .md.`);
+      toast(`Imported "${def.name}" from the .md file.`);
     }
     function deleteCustom(id) {
       const def = customDef(id); if (!def) return;
       const capture = getCapture();
       const used = capture ? capture.els.filter((e) => e.type === 'custom' && e.cid === id).length : 0;
-      const msg = used ? `Xoá "${def.name}"? ${used} bản đang nằm trên ảnh cũng sẽ bị gỡ.` : `Xoá "${def.name}"?`;
+      const msg = used ? `Delete "${def.name}"? ${used} instance(s) already on a shot will be removed too.` : `Delete "${def.name}"?`;
       if (!window.confirm(msg)) return;
       customs = customs.filter((c) => c.id !== id);
       if (capture) {
@@ -365,7 +365,7 @@
     function renderKitList() {
       $('#kitCount').textContent = KIT.length;
       kitList.innerHTML = KIT.map((k) => cmpRow(labSel.kind === 'kit' && labSel.id === k.id, k.ui.glyph, k.name,
-        k.ui.addable ? '' : 'nền')).join('');
+        k.ui.addable ? '' : 'frame')).join('');
       [...kitList.children].forEach((row, i) => row.addEventListener('click', () => {
         labSel = { kind: 'kit', id: KIT[i].id }; renderLab();
       }));
@@ -374,7 +374,7 @@
       $('#customCount').textContent = customs.length || '';
       customList.innerHTML = customs.length
         ? customs.map((c) => cmpRow(labSel.kind === 'custom' && labSel.id === c.id, '✦', c.name)).join('')
-        : '<p class="empty-hint" style="margin:0">Chưa có component nào của bạn.</p>';
+        : '<p class="empty-hint" style="margin:0">No components of your own yet.</p>';
       if (!customs.length) return;
       [...customList.children].forEach((row, i) => row.addEventListener('click', () => {
         labSel = { kind: 'custom', id: customs[i].id }; customDark = false; renderLab();
@@ -384,7 +384,7 @@
       $('#customPalCount').textContent = customs.length || '';
       customPalette.innerHTML = customs.length
         ? customs.map((c) => `<button class="pal-btn" data-add="custom:${c.id}"><span class="ico">✦</span>${escapeHtml(c.name)}</button>`).join('')
-        : '<p class="empty-hint" style="margin:0">Chưa có. Mở tab <b>Components</b> để tạo.</p>';
+        : '<p class="empty-hint" style="margin:0">None yet. Open the <b>Components</b> tab to make one.</p>';
     }
     function renderGround() {
       const capture = getCapture();
@@ -396,12 +396,12 @@
       labStage.classList.toggle('on-dark', ground === 'dark');
       labMock.style.display = mockToggle.checked && !onShot ? '' : 'none';
       groundNote.textContent = ground === 'shot' && !capture
-        ? 'Chưa có ảnh chụp — sang tab Snap chụp hoặc tải một ảnh lên trước.'
-        : (ground === 'dark' ? 'Mọi component phải được nhìn trên cả nền sáng lẫn nền tối trước khi duyệt.' : '');
+        ? 'No capture yet — go to the Snap tab and snap or upload an image first.'
+        : (ground === 'dark' ? 'Every component has to be seen on both light and dark ground before it ships.' : '');
     }
     function renderSpecimen() {
       if (labSel.kind === 'new') {
-        labSpecimenEl.innerHTML = '<p class="empty-hint" style="max-width:300px;text-align:center">Tải lên file .md ở panel bên phải — preview sẽ hiện ở đây.</p>';
+        labSpecimenEl.innerHTML = '<p class="empty-hint" style="max-width:300px;text-align:center">Upload a .md file in the panel on the right — the preview shows up here.</p>';
         return;
       }
       if (labSel.kind === 'kit') {
@@ -423,12 +423,12 @@
      *  a Claude session with a description of what's wanted, then upload whatever
      *  .md comes back (parseComponentMd() above reads it). */
     function renderNewComponentPanel() {
-      labTitle.textContent = 'Component mới';
-      labProps.innerHTML = `<p class="lab-blurb">Tạo bằng Claude của bạn: copy prompt bên dưới, dán vào Claude kèm mô tả component bạn muốn — Claude sẽ trả lời đúng định dạng Snap Studio đọc được. Lưu câu trả lời thành file <code>.md</code> rồi tải lên ở đây.</p>
-        <button class="btn block" id="newCopyPrompt">⧉ Copy prompt cho Claude</button>
-        <button class="btn primary block" id="newUploadMd">⇧ Tải lên file .md</button>
-        <p class="empty-hint">File .md phải có khối <code>---</code> ở đầu (tên, kích thước, chữ mẫu) và ít nhất một khối <code>\`\`\`css</code> — prompt ở trên đã yêu cầu Claude trả lời đúng định dạng đó.</p>`;
-      $('#newCopyPrompt').addEventListener('click', () => copyText(COMPONENT_PROMPT, 'Đã copy prompt — dán vào Claude của bạn.'));
+      labTitle.textContent = 'New component';
+      labProps.innerHTML = `<p class="lab-blurb">Built with your own Claude: copy the prompt below, paste it into Claude along with a description of the component you want — Claude answers in exactly the format Snap Studio reads. Save that answer as a <code>.md</code> file, then upload it here.</p>
+        <button class="btn block" id="newCopyPrompt">⧉ Copy the prompt for Claude</button>
+        <button class="btn primary block" id="newUploadMd">⇧ Upload a .md file</button>
+        <p class="empty-hint">The .md file needs a <code>---</code> block at the top (name, size, sample text) and at least one <code>\`\`\`css</code> block — the prompt above already asks Claude for exactly that format.</p>`;
+      $('#newCopyPrompt').addEventListener('click', () => copyText(COMPONENT_PROMPT, 'Prompt copied — paste it into your Claude.'));
       $('#newUploadMd').addEventListener('click', () => $('#mdInput').click());
     }
 
@@ -459,26 +459,17 @@
       const v = (comp && comp.demo) || {};
       const ctx = makeLabCtx(v);
 
-      let html = `<p class="lab-blurb">${escapeHtml(k.what)}</p>
-        <div class="prop-row"><label>Class</label><code>${k.selector}</code></div>`;
-      if (k.variants && k.variants.length) {
-        html += `<div class="prop-row"><label>Biến thể</label><div class="var-list">`
-          + k.variants.map((x) => `<code>${escapeHtml(x)}</code>`).join('') + '</div></div>';
-      }
+      let html = `<p class="lab-blurb">${escapeHtml(k.what)}</p>`;
 
       if (comp && comp.labPropsHtml) html += comp.labPropsHtml(v, ctx);
 
       html += k.ui.addable
-        ? `<button class="btn primary block" id="kAdd">Thêm vào ảnh →</button>`
-        : `<p class="empty-hint">Không phải annotation để thả lên ảnh — đây là nền + khung bao quanh cả bản export. Bật/tắt bằng công tắc <b>Khung ảnh</b> trên topbar.</p>`;
+        ? `<button class="btn primary block" id="kAdd">Add to the shot →</button>`
+        : `<p class="empty-hint">Not an annotation you drop on the shot — this is the background + frame around the whole export. Switch it on and off with the <b>Image frame</b> toggle in the topbar.</p>`;
 
-      // The kit's own words, not a paraphrase: use_when and gotchas come straight off
+      // The kit's own words, not a paraphrase: use_when comes straight off
       // the vendored catalog, so this panel says whatever the kit says today.
-      html += `<details class="kit-doc"><summary>Dùng khi nào</summary><p>${escapeHtml(k.use_when)}</p></details>`;
-      if (k.gotchas && k.gotchas.length) {
-        html += `<details class="kit-doc"><summary>Bẫy đã ghi nhận (${k.gotchas.length})</summary><ul>`
-          + k.gotchas.map((g) => `<li>${escapeHtml(g)}</li>`).join('') + '</ul></details>';
-      }
+      html += `<details class="kit-doc"><summary>When to use it</summary><p>${escapeHtml(k.use_when)}</p></details>`;
       labProps.innerHTML = html;
 
       $('#kAdd') && $('#kAdd').addEventListener('click', addFromLab);
@@ -497,22 +488,21 @@
       labTitle.textContent = def.name;
       const hasDark = !!def.darkCss.trim();
       labProps.innerHTML = `
-        <div class="prop-row"><label>Tên</label><input type="text" id="cName" value="${escapeHtml(def.name)}"></div>
-        <div class="prop-row"><label>Class</label><code id="cClass">.cmp-x-${def.slug}</code></div>
-        <div class="prop-row"><label>Kích thước trên ảnh</label><div class="seg" id="cSizing">
-          <button data-v="auto" class="${def.sizing === 'auto' ? 'on' : ''}">Ôm nội dung</button>
-          <button data-v="box" class="${def.sizing === 'box' ? 'on' : ''}">Khung kéo được</button></div></div>
-        ${def.sizing === 'box' ? `<div class="prop-row"><label>Kích thước mặc định (W × H)</label>
+        <div class="prop-row"><label>Name</label><input type="text" id="cName" value="${escapeHtml(def.name)}"></div>
+        <div class="prop-row"><label>Size on the shot</label><div class="seg" id="cSizing">
+          <button data-v="auto" class="${def.sizing === 'auto' ? 'on' : ''}">Hug content</button>
+          <button data-v="box" class="${def.sizing === 'box' ? 'on' : ''}">Draggable box</button></div></div>
+        ${def.sizing === 'box' ? `<div class="prop-row"><label>Default size (W × H)</label>
           <div style="display:flex;gap:8px"><input type="text" id="cW" value="${def.w}"><input type="text" id="cH" value="${def.h}"></div></div>` : ''}
-        <div class="prop-row"><label>Nội dung mẫu</label><input type="text" id="cText" value="${escapeHtml(def.text)}"></div>
+        <div class="prop-row"><label>Sample content</label><input type="text" id="cText" value="${escapeHtml(def.text)}"></div>
         <div id="cLint"></div>
         <div class="prop-row"><label>CSS</label><textarea class="css-edit" id="cCss" spellcheck="false">${escapeHtml(def.css)}</textarea></div>
-        <div class="prop-row"><label class="check-row"><input type="checkbox" id="cDarkOn" ${hasDark ? 'checked' : ''}> Có biến thể <code>.on-dark</code></label></div>
-        ${hasDark ? `<div class="prop-row"><label>CSS khi nền tối</label><textarea class="css-edit" id="cDarkCss" spellcheck="false">${escapeHtml(def.darkCss)}</textarea></div>
-          <div class="prop-row"><label class="check-row"><input type="checkbox" id="cPrevDark" ${customDark ? 'checked' : ''}> Xem biến thể on-dark</label></div>` : ''}
-        <button class="btn primary block" id="cAdd">Thêm vào ảnh →</button>
-        <button class="btn block" id="cCopy">⧉ Copy CSS component này</button>
-        <div class="del-row"><button class="btn" id="cDel">Xoá khỏi thư viện</button></div>`;
+        <div class="prop-row"><label class="check-row"><input type="checkbox" id="cDarkOn" ${hasDark ? 'checked' : ''}> Has a Dark mode variant</label></div>
+        ${hasDark ? `<div class="prop-row"><label>CSS on dark ground</label><textarea class="css-edit" id="cDarkCss" spellcheck="false">${escapeHtml(def.darkCss)}</textarea></div>
+          <div class="prop-row"><label class="check-row"><input type="checkbox" id="cPrevDark" ${customDark ? 'checked' : ''}> Preview the Dark mode variant</label></div>` : ''}
+        <button class="btn primary block" id="cAdd">Add to the shot →</button>
+        <button class="btn block" id="cCopy">⧉ Copy this component's CSS</button>
+        <div class="del-row"><button class="btn" id="cDel"><span class="gly">✕</span>Delete from the library</button></div>`;
       drawLint(def);
 
       // Live edits patch the <style> tag and the specimen only — never re-render this
@@ -522,7 +512,6 @@
       on('#cName', 'input', (e) => {
         def.name = e.target.value;
         def.slug = uniqueSlug(slugify(def.name), def.id);
-        $('#cClass').textContent = '.cmp-x-' + def.slug;
         labTitle.textContent = def.name || 'Component';
         live(); renderCustomList(); renderCustomPalette(); if (getCapture()) renderLayers();
       });
@@ -539,7 +528,7 @@
         live(); renderLabProps();
       });
       on('#cAdd', 'click', addFromLab);
-      on('#cCopy', 'click', () => copyText(buildOneCss(def), `Đã copy CSS của "${def.name}".`));
+      on('#cCopy', 'click', () => copyText(buildOneCss(def), `Copied the CSS for "${def.name}".`));
       on('#cDel', 'click', () => deleteCustom(def.id));
       const box = $('#cSizing');
       box.querySelectorAll('button').forEach((b) => b.addEventListener('click', () => {
@@ -550,7 +539,7 @@
     // ---- lab → stage --------------------------------------------------------
     function addFromLab() {
       const capture = getCapture();
-      if (!capture) { toast('Chưa có ảnh — sang tab Snap chụp hoặc tải ảnh lên trước.'); return; }
+      if (!capture) { toast('No capture yet — go to the Snap tab and snap or upload an image first.'); return; }
       let el;
       if (labSel.kind === 'custom') {
         el = newElement('custom:' + labSel.id);
@@ -563,12 +552,12 @@
         const comp = compByCatalogId(k.id);
         if (comp && comp.demo) Object.assign(el, comp.demo);
       }
-      if (!el) { toast('Component đó không còn tồn tại.'); return; }
+      if (!el) { toast('That component no longer exists.'); return; }
       capture.els.push(el);
       setSelId(el.id);
       setView('snap');
       render();
-      toast('Đã thả vào giữa ảnh — kéo vào đúng chỗ.');
+      toast('Dropped in the middle of the shot — drag it into place.');
     }
 
     function buildOneCss(def) {
@@ -578,19 +567,19 @@
     }
     async function copyText(text, okMsg) {
       try { await navigator.clipboard.writeText(text + '\n'); toast(okMsg); }
-      catch (e) { toast('Copy lỗi: ' + e.message); }
+      catch (e) { toast('Copy failed: ' + e.message); }
     }
     function copyAllCss() {
-      if (!customs.length) { toast('Chưa có component tự tạo nào để copy.'); return; }
+      if (!customs.length) { toast('No custom components to copy yet.'); return; }
       const header = [
-        `/* Snap Studio — ${customs.length} component tự tạo.`,
-        '   Dán vào cuối src/tokens.css để đưa hẳn vào design kit của repo này.',
-        '   Lưu ý: tokens.css ở đây là bản vendored của Editorial Glass, và repo không',
-        '   còn lệnh sync nào — dán vào đây là FORK chứ không phải sync. Xem',
-        '   .claude/skills/editorial-glass/SKILL.md, mục "Adding a component". */',
+        `/* Snap Studio — ${customs.length} custom component(s).`,
+        '   Paste at the end of src/tokens.css to make them part of this design kit for good.',
+        '   Note: tokens.css here is a vendored copy of Editorial Glass, and the repo has no',
+        '   sync command left — pasting here is a FORK, not a sync. See',
+        '   .claude/skills/editorial-glass/SKILL.md, section "Adding a component". */',
         '', '',
       ].join('\n');
-      copyText(header + buildCustomCss(), 'Đã copy CSS của mọi component tự tạo.');
+      copyText(header + buildCustomCss(), 'Copied the CSS of every custom component.');
     }
 
     mockToggle.addEventListener('change', renderGround);

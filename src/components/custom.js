@@ -24,7 +24,7 @@
 
     inner(el, ctx) {
       const def = ctx.customDef(el.cid);
-      if (!def) return `<div class="cmp-missing">component da bi xoa</div>`;
+      if (!def) return `<div class="cmp-missing">deleted component</div>`;
       // el.w, not def.sizing: the definition can be switched to a box long after this
       // instance was dropped, and an auto-sized instance has no width to fill.
       const box = el.w != null ? 'width:100%;height:100%;' : '';
@@ -39,9 +39,9 @@
 
     propsHtml(el, ctx) {
       const def = ctx.customDef(el.cid);
-      let html = ctx.rowText('pText', 'Nội dung', el.text, 2);
-      if (def && def.darkCss.trim()) html += ctx.rowCheck('pDark', 'Vùng ảnh bên dưới tối màu (on-dark)', el.dark);
-      html += ctx.note(`${el.w != null ? 'Kéo để di chuyển, kéo góc dưới-phải để đổi kích thước. ' : ''}Sửa CSS của component này ở tab <b>Components</b>.`);
+      let html = ctx.rowText('pText', 'Content', el.text, 2);
+      if (def && def.darkCss.trim()) html += ctx.rowCheck('pDark', 'The shot underneath is dark (Dark mode)', el.dark);
+      html += ctx.note(`${el.w != null ? 'Drag to move, drag the bottom-right corner to resize. ' : ''}Edit this component's CSS in the <b>Components</b> tab.`);
       return html;
     },
 

@@ -1,7 +1,7 @@
 /* Screenshot Presentation — .cmp-screenshot-canvas. The mandatory padded
    background + rounded frame every export sits on. Not a droppable
-   annotation — no `type`, never appears in capture.els — it is the "Khung
-   ảnh" topbar toggle (see applyFrame() in editor.js). Registered here only
+   annotation — no `type`, never appears in capture.els — it is the "Image
+   frame" topbar toggle (see applyFrame() in editor.js). Registered here only
    so the Components/Lab tab's kit list stays honest that all 8 catalog
    entries are represented. See kit-catalog.js's "screenshot-canvas" entry
    for the kit's own spec/gotchas. */
