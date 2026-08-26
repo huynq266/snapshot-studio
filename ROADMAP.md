@@ -5,7 +5,7 @@ thực tế** trong repo, và chia phần còn lại thành các bước triển
 
 - Đề xuất gốc: https://claude.ai/code/artifact/bb022e74-06c3-4396-98b5-e429ff224f52
 - Repo tiền thân: `github.com/pdtoan2811-bit/ownegoMarketingMaterialToolkit` → `tools/doc-guide/packages/userguidesnap`
-- Cập nhật lần cuối: 2026-08-24
+- Cập nhật lần cuối: 2026-08-26
 
 > Đề xuất ghi trạng thái *"ý tưởng, chưa triển khai"* — dòng đó đã lỗi thời. V1 đã có mã
 > chạy được. Tài liệu này là nguồn sự thật mới về tiến độ.
@@ -118,12 +118,28 @@ Việc nhỏ, nhưng **chặn việc dùng thật**. Nên làm trước tất c�
 
 Mục tiêu: *ảnh chụp có chỗ sống và có đường ra.*
 
-- [ ] **Thư viện lịch sử (Snap Library).** Hiện tại snap ảnh mới là **đè mất** ảnh cũ —
-      phải export/copy trước khi chụp tiếp. Dựng lại từ giao diện job-board của Guide Studio.
-      Cần quyết chỗ lưu: `IndexedDB` trong extension, hay một server nhỏ.
-- [ ] **Chính sách lưu trữ / tự xoá.** Không tách khỏi mục trên — ảnh support gần như
-      chắc chắn chứa dữ liệu khách hàng. Phải chốt hạn lưu + ai được xem *trước khi* bật
-      thư viện, không phải sau.
+- [x] **Thư viện lịch sử (Snap Library).** Đã dựng: tab **Library** thứ ba trong topbar
+      (cạnh Snap/Components), `src/library.js`. Chỗ lưu đã quyết: **IndexedDB trong
+      extension, không server** (theo hướng chỉ-trong-máy của "Quyết định còn treo" #2 —
+      chưa có backend nào trong repo này, và job-board/share-link vẫn cần một cái nếu làm
+      tiếp). Có dedup (so JSON của `els`, qua một `WeakMap` chứ không gắn field vào
+      `capture`) để mở một mục ra rồi đóng lại không tự nhân bản. Nút **Save to library**
+      trong toolbar là checkpoint thủ công, luôn ghi (không dedup) vì bấm nút mà không thấy
+      gì xảy ra thì đọc như hỏng.
+      **2026-08-26 — đổi cơ chế nguồn:** cơ chế đè mất của V1 giờ sửa tận gốc theo cách
+      khác, không còn dựa vào Library làm nơi giữ duy nhất. `editor.js` giờ có một dải tab
+      chụp (`#snapTabs`/`renderTabs()`) phía trên canvas — snap mới, và mở lại một mục từ
+      Library, đều mở như MỘT TAB MỚI (`captures` array), giữ nguyên tab đang có để chuyển
+      qua lại và copy chéo, thay vì gọi `finishCaptureSwap()` để ghi đè `capture` như trước.
+      Library giờ chỉ còn là lưới cho hai đường THỰC SỰ vứt bỏ một capture: đóng một tab
+      (nút ✕ trên tab, `closeTab()`) và **Replace base image…** (`replaceInPlace: true` —
+      vẫn đổi ảnh ngay tại chỗ, có xác nhận, xem README mục "Try it" bước 7).
+- [x] **Chính sách lưu trữ / tự xoá.** Không tách khỏi mục trên, làm cùng lúc, không phải
+      sau. Mặc định **giữ 14 ngày**, chỉnh được 7/14/30/không bao giờ ngay trong tab
+      Library; hạ xuống một mốc ngắn hơn thì xoá phần quá hạn ngay, không đợi lần mở sau.
+      "Ai được xem": vì chọn không server, câu trả lời là *chỉ máy này* — không đồng bộ,
+      không link chia sẻ, không nơi thứ hai nào đọc được — nói thẳng trong UI của tab
+      Library, không giả định người dùng tự suy ra.
 - [ ] **Đính thẳng vào Zendesk/Intercom/Slack**, theo kiểu "degrade loudly" mà repo tiền
       thân đã dùng cho các API key tùy chọn.
 - [ ] **Link chia sẻ.** Hạng mục V1 duy nhất bị bỏ lại. Cần server → xem "Quyết định còn treo" #2.
@@ -202,9 +218,13 @@ toolkit rồi copy tay sang. Component Forge cần đọc/ghi trực tiếp `cat
 nên hoặc nhập lại repo, hoặc phải dựng một cơ chế đồng bộ hai chiều — việc mà đề xuất đã
 cố tình tránh.
 
-**2. V2 có server hay không?** Link chia sẻ, Snap Library dùng chung, và tích hợp ticket
-đều cần nơi lưu ngoài trình duyệt. Nếu quyết "không server", cả ba phải thiết kế lại theo
-hướng chỉ-trong-máy (IndexedDB + export tay).
+**2. V2 có server hay không?** *(một phần đã quyết — xem dưới)*
+Link chia sẻ, Snap Library dùng chung, và tích hợp ticket đều cần nơi lưu ngoài trình
+duyệt. Phần **Snap Library** đã chốt: **không server**, `IndexedDB` chỉ-trong-máy (xem
+mục V2 ở trên) — quyết định này chỉ có hiệu lực cho lịch sử snap của MỘT máy/MỘT profile
+trình duyệt. Hai phần còn lại của câu hỏi vẫn treo nguyên: **link chia sẻ** và **Snap
+Library dùng chung giữa nhiều người/máy** đều đòi hỏi thứ mà chỉ-trong-máy không cho
+được — cả hai vẫn cần server nếu làm.
 
 **3. Link chia sẻ có hết hạn / có bắt đăng nhập không?** Đặc biệt quan trọng khi ảnh có
 dữ liệu khách hàng và link lỡ lọt ra ngoài kênh nội bộ.

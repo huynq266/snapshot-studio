@@ -39,25 +39,47 @@
       // actually painted before the compositor screenshot fires
       await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
       if (document.fonts && document.fonts.ready) { try { await document.fonts.ready; } catch (e) {} }
+      // The veil is still fully opaque here — it has to come off before the shot, or the
+      // compositor screenshot captures the veil itself (a solid paper-coloured rectangle)
+      // instead of the stage behind it. Snap it off instantly (no fade: the layout is
+      // already settled, so there's no cut to cover) rather than the transition used
+      // everywhere else, since a mid-fade veil would wash the shot out instead of hiding it.
+      veil.style.transition = 'none';
+      veil.classList.remove('show');
+      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+      const dpr = window.devicePixelRatio || 1;
+      // Measure the stage HERE, while render mode is still active — it has to be read
+      // in the same layout the screenshot below actually captures (chrome-less, natural
+      // size, flex-centered per editor.css). Reading it after the finally block reverts
+      // render mode measures the normal zoomed/chrome-visible position instead, which
+      // shares no coordinate space with the screenshot and crops the wrong region.
+      const box = stage.getBoundingClientRect();
       let res;
       try { res = hasExt ? await chrome.runtime.sendMessage({ type: 'capture-for-export' }) : { error: 'not running as an extension' }; }
       finally {
+        // Snap the veil back on (still no transition) to cover the reverse cut, THEN
+        // toggle render mode off behind it, then restore the transition and fade it
+        // back out once the normal layout has repainted underneath.
+        veil.classList.add('show');
         document.body.classList.remove('render');
         // one more frame so the restored layout is painted behind the veil before it lifts
         await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+        veil.style.transition = '';
         veil.classList.remove('show');
       }
       if (!res || res.error) throw new Error((res && res.error) || 'capture failed');
-      const dpr = window.devicePixelRatio || 1;
       // Measure the stage rather than the image: with the screenshot-canvas on, the
       // export is image + padding, and the frame is part of the deliverable.
-      const box = stage.getBoundingClientRect();
       const wantW = Math.round(box.width * dpr), wantH = Math.round(box.height * dpr);
       const availW = Math.round(document.documentElement.clientWidth * dpr), availH = Math.round(document.documentElement.clientHeight * dpr);
       if (wantW > availW || wantH > availH) {
         toast(`Browser window is smaller than the export (${Math.round(box.width)}×${Math.round(box.height)}px) — the image gets cropped. Enlarge the window, then export again for the full frame.`, 5000);
       }
-      return cropDataUrl(res.dataUrl, 0, 0, Math.min(wantW, availW), Math.min(wantH, availH));
+      // body.render keeps the stage flex-centered rather than pinned to (0,0) (see
+      // editor.css), so the crop has to start from its real on-screen position —
+      // clamped to 0 in case centering pushed it partly past the viewport edge.
+      const sx = Math.max(0, Math.round(box.left * dpr)), sy = Math.max(0, Math.round(box.top * dpr));
+      return cropDataUrl(res.dataUrl, sx, sy, Math.min(wantW, availW - sx), Math.min(wantH, availH - sy));
     }
 
     function fileSlug() {

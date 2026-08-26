@@ -522,58 +522,53 @@
    the subject, deliberately obscured). Spec:
    docs/tung-guideline-components/component-privacy-blur.md.
 
-   Anatomy: root .cmp-privacy-blur (the blurred region) — no badge/icon.
-   The spec calls for one to mark the blur as deliberate rather than a
-   rendering bug; dropped here on direct instruction. The spec doc itself
-   hasn't been updated to match — treat that as open, not resolved.
+   Anatomy: root .cmp-privacy-blur — no badge/icon (the spec calls for one
+   to mark the blur as deliberate rather than a rendering bug; dropped here
+   on direct instruction, same as before — see the open-spec caveat below).
 
-   DEVIATION from spec, also on direct instruction: this now carries a 92%
-   --color-neutral-300 fill alongside the blur. The spec's "no fill of its
-   own" line assumes backdrop-filter blur renders evenly on its own;
-   empirically it doesn't — Chromium's backdrop blur (this is the same
-   rendering path guide-image-build's Playwright capture uses) renders a
-   soft left-to-right gradient inside the box, confirmed present at every
-   opacity down to 0% fill and every radius tested (8–30px), i.e. it's
-   intrinsic to backdrop-filter itself, not a consequence of the box
-   overlapping blank background or of any particular radius. A flat,
-   non-backdrop `background` painted on top hides it in direct proportion
-   to that fill's own opacity, so the fix is a fill opaque enough to fully
-   mask it. White (--color-neutral-0) got there at ~97%, but by then it's
-   indistinguishable from the light card/page it usually sits on — a
-   redaction you can't see is worse than an uneven one, since nothing marks
-   the field as deliberately hidden rather than just empty. --color-neutral-
-   300 masks the same gradient at the same opacity while staying visibly a
-   distinct grey patch against a white or near-white surface. Consequence:
-   this is no longer "identical on any background" — a fill this light over
-   a genuinely dark screenshot will read as a pale patch rather than
-   blending. Fine for the light-UI case this kit targets today; revisit if
-   a dark-mode source screenshot ever needs redacting.
+   MAJOR DEVIATION from spec, on direct instruction: this is no longer a
+   backdrop-filter blur at all. It went through two rounds of tuning as a
+   Gaussian blur (a 92%→96% neutral-300 fill on top, radius 18px→30px, to
+   mask Chromium's own backdrop-blur gradient banding — see git history for
+   that whole investigation) before landing here on true pixelation/mosaic
+   instead, to match Monosnap's blur tool. components/blur.js's content()
+   crops the region straight out of capture.img via canvas (shrink to one
+   pixel per BLOCK-px cell so the browser's own smoothing averages each
+   cell, then blow that back up with smoothing off so it reads as solid
+   squares) and sets the result as this element's background-image —
+   real, resampled pixels baked into a data URL per instance, not a live
+   filter. That resolves the whole backdrop-filter gradient-banding problem
+   the fill was there to hide (nothing here is a *backdrop* filter anymore,
+   so there's no banding to mask) and, as a side effect, the light/dark-
+   background mismatch the fill carried (a mosaic of the actual screenshot
+   pixels is correct on any background, light or dark, with no `.on-dark`
+   needed). The CSS rule below is now just shape/position — every actual
+   pixel comes from the inline background-image components/blur.js sets
+   per instance, so there's nothing left here for `lintCss()` to flag as a
+   hardcoded colour. The spec doc hasn't been reconciled with any of this;
+   treat it as open, same as the dropped badge above.
 
    Gotcha: never repurpose for emphasis — that's highlight-box or spotlight.
    Mixing "blurred but also emphasised" sends a contradictory signal about
    whether the viewer should be looking at it.
 
-   Gotcha: this is a *backdrop* filter, so it only obscures what is painted
-   behind it. It must be positioned to overlap the pixels being redacted —
-   placed beside them (an inline span next to the text rather than over it)
-   it renders as a no-op that looks like a plain empty box, which is the
-   opposite of what this element exists to do. It also needs the screenshot
-   inside its own backdrop root: an ancestor with `filter`, `opacity` < 1,
-   or its own `backdrop-filter` starts a new one and cuts the screenshot
-   out of what this can see. House rule 2 in AGENTS.md is the same hazard
-   from the other side — keep 3D transforms away from it.
+   Gotcha: still scoped to capture.img only, same as zoom-magnify's own
+   crop — a pasted image layer or another annotation stacked under the box
+   is NOT what gets sampled, only the base screenshot. It must still be
+   positioned to overlap the pixels being redacted, but the failure mode
+   changed: with backdrop-filter gone there's no such thing as an empty
+   no-op box anymore — placed in the wrong spot, it now confidently mosaics
+   *some* real pixels, just not the ones meant to be hidden.
 
-   Gotcha: undersized regions still blur unevenly beneath the fill — an
-   18px radius needs real room to diffuse into. Redact the whole field row,
-   not the text's exact cap height; the fill hides the smear, it doesn't
-   substitute for giving the blur enough room.
+   Gotcha: BLOCK (components/blur.js) is a fixed 12px mosaic cell in source-
+   image px, not exposed in the Properties panel — same "no variants on
+   this component" stance the original had. A box smaller than BLOCK on an
+   axis just collapses to one flat averaged-colour block on that axis
+   rather than smearing unevenly, which was the old blur's failure mode.
    ────────────────────────────────────────────────────────────────────── */
 .cmp-privacy-blur {
   position: absolute;
   border-radius: var(--radius-md);
-  background: rgba(var(--color-neutral-300-rgb), 0.92);
-  -webkit-backdrop-filter: blur(18px);
-  backdrop-filter: blur(18px);
 }
 
 /* ── arrow ────────────────────────────────────────────────────────────────
@@ -845,11 +840,11 @@ body.render .el-del { display: none !important; }
 .el.selected .arrow-end { display: block; }
 body.render .arrow-end { display: none !important; }
 
-/* While the palette is waiting for the click-drag that draws a new arrow (see
-   startArrowPlacement() in editor.js): crosshair everywhere on the shot, including
-   over existing elements, since a click there should start the new arrow rather
-   than pick up whatever it lands on. */
-.stage.placing-arrow, .stage.placing-arrow * { cursor: crosshair !important; }
+/* While the palette is waiting for the click-drag that draws a new arrow or box
+   component (see startArrowPlacement()/startBoxPlacement() in editor.js): crosshair
+   everywhere on the shot, including over existing elements, since a click there
+   should start the new component rather than pick up whatever it lands on. */
+.stage.placing, .stage.placing * { cursor: crosshair !important; }
 
 /* ---- spotlight ----------------------------------------------------------
    Same full-canvas wrapper trick as arrow, for a different reason: the cutout
@@ -894,3 +889,33 @@ body.render .el[data-type="spotlight"].selected .cmp-spotlight-cutout { outline:
    tracks shape the same way --sel-radius already does for zoom-magnify
    above. No "dim the surround" variant here — that's spotlight's own job. */
 .el[data-type="highlight"].selected::after { border-radius: var(--sel-radius, var(--radius-lg)); }
+
+/* ---- crop frame: Snap Studio's own tool, not a kit component --------------
+   Re-frames the base image itself (crops its pixels, then shifts every
+   element's stored x/y to match the new origin) rather than adding an .el —
+   see the "crop frame" section of editor.js. Same dim+cutout anatomy as
+   spotlight above: #cropLayer is an ancestor sized to the shot with
+   overflow:hidden, .crop-frame is the "cutout" whose own oversized
+   box-shadow paints the dimmed surround, clipped at the shot's own edges by
+   that ancestor rather than bleeding across the whole padded stage.
+   #cropLayer itself (not just .crop-frame) takes the pointer events, so a
+   drag started anywhere over the dimmed area still moves the frame instead
+   of falling through to whatever annotation happens to sit underneath.
+   Stripped in body.render like every other editor affordance — a crop is
+   always applied or cancelled before an export runs, never mid-flight when
+   the screenshot fires. */
+#cropLayer { position: absolute; inset: 0; overflow: hidden; z-index: 20; cursor: move; }
+.crop-frame { position: absolute; box-sizing: border-box; border: 2px solid var(--color-primary-500);
+  box-shadow: 0 0 0 9999px rgba(var(--color-neutral-900-rgb), .55); }
+.crop-dims { position: absolute; left: 0; top: 0; transform: translate(0, calc(-100% - var(--space-2)));
+  background: var(--color-primary-500); color: var(--color-neutral-0);
+  font-family: var(--mono); font-size: var(--text-xs); font-weight: var(--weight-semibold);
+  padding: 2px var(--space-2); border-radius: var(--radius-sm); white-space: nowrap; }
+.crop-handle { position: absolute; width: 14px; height: 14px; border-radius: var(--radius-sm);
+  background: var(--color-neutral-0); border: 2px solid var(--color-primary-500); box-shadow: var(--shadow-sm);
+  transform: translate(-50%, -50%); }
+.crop-handle[data-h="nw"] { left: 0; top: 0; cursor: nwse-resize; }
+.crop-handle[data-h="ne"] { left: 100%; top: 0; cursor: nesw-resize; }
+.crop-handle[data-h="se"] { left: 100%; top: 100%; cursor: nwse-resize; }
+.crop-handle[data-h="sw"] { left: 0; top: 100%; cursor: nesw-resize; }
+body.render #cropLayer { display: none !important; }
