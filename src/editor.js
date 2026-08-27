@@ -650,12 +650,13 @@
   let view = 'snap';
   function setView(v) {
     if (placing) placing.cancel();          // leaving the canvas mid-placement would strand its listeners
-    view = v === 'lab' ? 'lab' : 'snap';
+    view = (v === 'lab' || v === 'kb') ? v : 'snap';
     document.body.classList.toggle('view-lab', view === 'lab');
     document.body.classList.toggle('view-snap', view === 'snap');
+    document.body.classList.toggle('view-kb', view === 'kb');
     document.querySelectorAll('.vtab').forEach((b) => b.classList.toggle('on', b.dataset.view === view));
     if (view === 'lab') SnapKit.lab.renderLab();
-    else if (capture) applyZoom(computeFit());
+    else if (view === 'snap' && capture) applyZoom(computeFit());
   }
   document.querySelectorAll('.vtab').forEach((b) => b.addEventListener('click', () => setView(b.dataset.view)));
 
@@ -675,11 +676,23 @@
     cropDataUrl, loadImage, loadCapture,
     select, setView,
   });
+  SnapKit.bridge.init({
+    getCapture: () => capture,
+    loadCapture, loadImage, newElement,
+    render, select, getView: () => view, setView, toast,
+  });
+  SnapKit.kb.init({ toast });
 
   // ---- wiring to the extension's capture pipeline --------------------------
   if (hasExt) {
-    chrome.storage.local.get(['pendingCapture', 'captureId', 'captureUrl', 'captureRect']).then((r) => {
-      if (r && r.pendingCapture) loadCapture({ id: r.captureId, dataUrl: r.pendingCapture, url: r.captureUrl, rect: r.captureRect });
+    const PENDING_KEYS = ['pendingCapture', 'captureId', 'captureUrl', 'captureRect'];
+    chrome.storage.local.get(PENDING_KEYS).then(async (r) => {
+      if (!r || !r.pendingCapture) return;
+      await loadCapture({ id: r.captureId, dataUrl: r.pendingCapture, url: r.captureUrl, rect: r.captureRect });
+      // A screenshot can carry customer data, and chrome.storage.local has no TTL of
+      // its own — background.js writes it but never clears it (see KB-BRIDGE.md 5.1),
+      // so it is cleared here, the moment the editor actually has the image.
+      chrome.storage.local.remove(PENDING_KEYS).catch(() => {});
     }).catch(() => {});
     chrome.runtime.onMessage.addListener((msg) => {
       if (msg && msg.type === 'snap-capture') loadCapture({ id: msg.id, dataUrl: msg.dataUrl, url: msg.url, rect: msg.rect });

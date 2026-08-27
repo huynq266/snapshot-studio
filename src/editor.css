@@ -179,6 +179,13 @@ body.view-snap .tb-actions[data-for="lab"], body.view-lab .tb-actions[data-for="
 body.view-snap .lab { display: none; }
 body.view-lab .body { display: none; }
 body.render .lab, body.render .viewtabs { display: none !important; }
+/* Third view (KB, topology B) added alongside the snap/lab pair above rather than
+   folded into it, so the original two-view rules stay exactly as they were. */
+body.view-snap .tb-actions[data-for="kb"], body.view-lab .tb-actions[data-for="kb"],
+body.view-kb .tb-actions[data-for="snap"], body.view-kb .tb-actions[data-for="lab"] { display: none; }
+body.view-snap .kb, body.view-lab .kb { display: none; }
+body.view-kb .body, body.view-kb .lab { display: none; }
+body.render .kb { display: none !important; }
 
 .btn.block { width: 100%; margin-top: var(--space-2); }
 .lab { flex: 1; display: grid; grid-template-columns: 216px 1fr 300px; min-height: 0; }
@@ -293,4 +300,32 @@ body.render .lab, body.render .viewtabs { display: none !important; }
 .kit-doc[open] summary::before { content: "▾  "; }
 .kit-doc summary:hover { color: var(--ink); }
 .kit-doc p { font-size: var(--text-xs); line-height: 1.6; color: var(--ink-2); margin: var(--space-2) 0 0; }
+
+/* =====================================================================
+   KB TAB — topology B: upload a spec, spawn an agent, watch it work.
+   Same furniture as the other two tabs (rail + .btn + .empty-hint); only
+   the log pane on the right is new. Never exported: display:none under
+   body.render, same as .lab.
+   ===================================================================== */
+.kb { flex: 1; display: grid; grid-template-columns: 260px 1fr; min-height: 0; }
+.kb-rail { background: var(--surface); border-right: 1px solid var(--line); overflow-y: auto; padding: var(--space-4) 14px; }
+.kb-rail h3 { font-size: 11px; font-weight: var(--weight-bold); letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin: 0 0 var(--space-2); }
+.kb-rail h3:not(:first-child) { margin-top: 22px; }
+.kb-filename { font-size: var(--text-xs); color: var(--ink-2); margin: var(--space-2) 0 0; word-break: break-all; }
+.kb-domain-input { width: 100%; font-family: var(--mono); font-size: var(--text-sm); padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--paper); color: var(--ink); }
+.kb-domain-input:focus { outline: 2px solid var(--accent-line); outline-offset: 1px; border-color: var(--accent); }
+
+.kb-log-wrap { min-width: 0; padding: var(--space-4); overflow-y: auto; }
+.kb-log { font-family: var(--mono); font-size: var(--text-xs); line-height: 1.6; background: var(--paper);
+  border: 1px solid var(--line); border-radius: var(--radius-lg); padding: var(--space-4); min-height: 100%; }
+.kb-log-line { padding: 2px 0; white-space: pre-wrap; word-break: break-word; }
+.kb-log-line--tool { color: var(--accent-ink); }
+.kb-log-line--denied { color: var(--down); }
+.kb-log-line--done { color: var(--color-success-700); font-weight: var(--weight-semibold); }
+.kb-log-line--error { background: var(--color-error-50); color: var(--down); border-radius: var(--radius-sm); padding: 3px 6px; }
+
+.kb-banner { display: flex; align-items: center; gap: var(--space-2); margin-left: var(--space-3); padding: 6px var(--space-3);
+  border-radius: var(--radius-full); background: var(--color-warning-50); border: 1px solid var(--color-warning-500);
+  color: var(--color-warning-700); font-size: var(--text-xs); font-weight: var(--weight-semibold); }
 .pal-btn small { font-weight: var(--weight-medium); font-size: 10.5px; color: var(--muted); margin-left: 3px; }

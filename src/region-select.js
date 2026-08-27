@@ -1,6 +1,9 @@
 /* Region-select overlay — injected into the target page on demand, removes
    itself when done. Runs inside the HOST page, so styles are all inline
    (never a linked stylesheet) to avoid colliding with the page's own CSS.
+   That is also why nothing here can read a token: tokens.css is not loaded in
+   the host page, and the page's own :root is not ours. The accent still has to
+   follow the app — see ACCENT_HEX below for how it gets in.
 
    Job: let the user drag a rectangle, then hand the RECT (in CSS px, viewport-
    relative) back to the background. The background still does the actual
@@ -17,7 +20,19 @@
      Deep enough that the undimmed hole reads as lit rather than merely less grey — the
      selection is never outlined ON the page, it is the page with everything else pushed back. */
   const DIM = 'rgba(17,17,20,.55)';
-  const ACCENT_RGB = '19,80,222';    // matches --color-primary-500-rgb in tokens.css; can't read the token from inside a host page
+
+  /* The frame, its glow and the size label are the app's primary colour, so re-toning
+     the kit has to re-tone the selection UI too — an overlay stuck on kit-blue while
+     everything else went purple is the same staleness a hardcoded hex always causes.
+     Two pieces get it here, both arranged by startRegionCapture() in background.js:
+     accent-ramp.js is injected immediately before this file (same isolated world, so
+     window.SnapKit is already up), and the picked hex is set on window one injection
+     earlier still, so the FIRST paint is already right — no blue flash, which on an
+     overlay that appears under the cursor would be far more visible than in a popup.
+     No hex literal to go stale: the kit default lives in accent-ramp.js as well. */
+  const accent = window.SnapKit.accent;
+  const ACCENT_HEX = window.__snapStudioAccent || accent.DEFAULT_500;
+  const ACCENT_RGB = accent.ramp(ACCENT_HEX)['500-rgb'];
 
   const overlay = document.createElement('div');
   overlay.style.cssText = `position:fixed;inset:0;z-index:2147483647;cursor:crosshair;background:${DIM}`;
@@ -36,17 +51,17 @@
      busiest, and that element stays undimmed. It sits at the same top value as the overlay and
      wins by tree order, being appended after it. */
   const box = document.createElement('div');
-  box.style.cssText = `position:fixed;z-index:2147483647;border:2px solid #1350de;display:none;pointer-events:none;box-sizing:border-box;box-shadow:0 0 0 1px rgba(255,255,255,.92),0 0 18px 2px rgba(${ACCENT_RGB},.55),0 0 0 100vmax ${DIM},inset 0 0 0 1px rgba(255,255,255,.3)`;
+  box.style.cssText = `position:fixed;z-index:2147483647;border:2px solid ${ACCENT_HEX};display:none;pointer-events:none;box-sizing:border-box;box-shadow:0 0 0 1px rgba(255,255,255,.92),0 0 18px 2px rgba(${ACCENT_RGB},.55),0 0 0 100vmax ${DIM},inset 0 0 0 1px rgba(255,255,255,.3)`;
   /* Corner handles: the one cue that reads as "a rectangle you are sizing" rather than "a box
      drawn around something". Children of the box, so they track it for free — paint() never
      has to move them. -7px = 5px (half a handle) + 2px (the box's own border). */
   for (const corner of ['top:-7px;left:-7px', 'top:-7px;right:-7px', 'bottom:-7px;left:-7px', 'bottom:-7px;right:-7px']) {
     const h = document.createElement('div');
-    h.style.cssText = `position:absolute;${corner};width:10px;height:10px;border-radius:2px;background:#fff;border:2px solid #1350de;box-sizing:border-box;box-shadow:0 1px 3px rgba(0,0,0,.4)`;
+    h.style.cssText = `position:absolute;${corner};width:10px;height:10px;border-radius:2px;background:#fff;border:2px solid ${ACCENT_HEX};box-sizing:border-box;box-shadow:0 1px 3px rgba(0,0,0,.4)`;
     box.append(h);
   }
   const label = document.createElement('div');
-  label.style.cssText = 'position:fixed;font:600 11px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#fff;background:#1350de;padding:3px 8px;border-radius:5px;pointer-events:none;display:none;z-index:2147483647;box-shadow:0 2px 8px -2px rgba(0,0,0,.5)';
+  label.style.cssText = `position:fixed;font:600 11px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#fff;background:${ACCENT_HEX};padding:3px 8px;border-radius:5px;pointer-events:none;display:none;z-index:2147483647;box-shadow:0 2px 8px -2px rgba(0,0,0,.5)`;
   const hint = document.createElement('div');
   hint.textContent = 'Drag to select a region · Esc to cancel';
   hint.style.cssText = 'position:fixed;top:14px;left:50%;transform:translateX(-50%);font:600 12px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#fff;background:#14151a;padding:6px 14px;border-radius:999px;pointer-events:none;z-index:2147483647;box-shadow:0 8px 20px -8px rgba(0,0,0,.5)';

@@ -2,30 +2,42 @@
 <html>
 <head>
 <meta charset="utf-8">
-<!-- Colours are hand-copied from tokens.css's foundations layer, not a <link> to it: this
-     popup is its own tiny document with no stage to size around, so pulling in the whole
-     kit for four hex values isn't worth the request. Keep these in sync by eye if the
-     brand pack's primary/neutral ramp ever moves. -->
+<!-- The popup is a separate document from the editor, so it needs its own copy of the
+     cascade the editor builds in editor.html: tokens.css, then the accent override
+     right after it. Colours used to be hand-copied hex here on the theory that four
+     values weren't worth a stylesheet — but that made the popup the one surface that
+     stayed kit-default blue after someone re-toned the app, which is exactly the
+     staleness CLAUDE.md's no-literals rule is about. tokens.css is a bundled local
+     file; there is no request to save. -->
+<link rel="stylesheet" href="tokens.css">
+<!-- Filled in below from the same stored hex the editor's picker writes. -->
+<style id="accentVars"></style>
+<script src="accent-ramp.js"></script>
+<script src="popup-accent.js"></script>
 <style>
-  body { width: 258px; margin: 0; font-family: 'Inter', system-ui, sans-serif; color: #14151a; padding: 14px; }
-  .row { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+  body { width: 258px; margin: 0; padding: 14px; font-family: var(--font-sans); color: var(--ink); }
+  .row { display: flex; align-items: center; gap: var(--space-2); margin-bottom: var(--space-3); }
   .mk { display: block; width: 22px; height: 22px; flex: none; }
-  .t { font-weight: 800; font-size: 13px; letter-spacing: -.02em; text-transform: uppercase; }
-  .t small { display: block; font-family: ui-monospace, monospace; font-size: 8px; letter-spacing: .16em; text-transform: uppercase; color: #0c3491; margin-top: 1px; }
-  button { width: 100%; font-family: inherit; font-size: 13px; font-weight: 600; padding: 9px; border-radius: 9px; cursor: pointer; margin-bottom: 7px; border: 1px solid #e2e4e8; background: #fff; }
-  button.primary { background: #1350de; color: #fff; border-color: #1350de; }
-  .hint { font-size: 11px; color: #787d87; line-height: 1.45; margin: 4px 0 0; }
-  .kbd { font-family: ui-monospace, monospace; font-size: 10px; background: #f8f8f8; border: 1px solid #e2e4e8; border-radius: 4px; padding: 1px 4px; }
+  .t { font-weight: 800; font-size: var(--text-sm); letter-spacing: -.02em; text-transform: uppercase; }
+  .t small { display: block; font-family: var(--mono); font-size: 8px; letter-spacing: .16em; text-transform: uppercase; color: var(--accent-ink); margin-top: 1px; }
+  button { width: 100%; font-family: inherit; font-size: var(--text-sm); font-weight: var(--weight-semibold); padding: 9px; border-radius: 9px; cursor: pointer;
+    margin-bottom: 7px; border: 1px solid var(--line); background: var(--surface); color: var(--ink); }
+  button:hover { border-color: var(--accent-line); background: var(--accent-soft); }
+  button.primary { background: var(--accent); color: var(--color-neutral-0); border-color: var(--accent); }
+  button.primary:hover { background: var(--accent-ink); border-color: var(--accent-ink); }
+  .hint { font-size: 11px; color: var(--muted); line-height: 1.45; margin: var(--space-1) 0 0; }
+  .kbd { font-family: var(--mono); font-size: 10px; background: var(--paper); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 1px 4px; }
+  #status { color: var(--accent-ink); min-height: 14px; }
 </style>
 </head>
 <body>
   <div class="row">
     <svg class="mk" viewBox="0 0 88 88" fill="none" aria-hidden="true">
-      <path d="M4 26V4H26" stroke="#14151a" stroke-width="6"/>
-      <path d="M84 26V4H62" stroke="#14151a" stroke-width="6"/>
-      <path d="M4 62V84H26" stroke="#14151a" stroke-width="6"/>
-      <path d="M84 62V84H62" stroke="#14151a" stroke-width="6"/>
-      <path d="M32 30L60 44L48 48L46 60L32 30Z" fill="#1350de"/>
+      <path d="M4 26V4H26" stroke="var(--ink)" stroke-width="6"/>
+      <path d="M84 26V4H62" stroke="var(--ink)" stroke-width="6"/>
+      <path d="M4 62V84H26" stroke="var(--ink)" stroke-width="6"/>
+      <path d="M84 62V84H62" stroke="var(--ink)" stroke-width="6"/>
+      <path d="M32 30L60 44L48 48L46 60L32 30Z" fill="var(--accent)"/>
     </svg>
     <span class="t">Snap Studio<small>snap · annotate · export</small></span>
   </div>
@@ -33,7 +45,7 @@
   <button id="capture">📸 Snap visible tab</button>
   <button id="captureRegion">▭ Snap a region…</button>
   <p class="hint">Whole tab: <span class="kbd">Alt+Shift+S</span> · Region: <span class="kbd">Alt+Shift+R</span>. Opens the editor with the capture already dropped in — no project or job to set up first.</p>
-  <p class="hint" id="status" style="color:#0c3491;min-height:14px"></p>
+  <p class="hint" id="status"></p>
   <script src="popup.js"></script>
 </body>
 </html>

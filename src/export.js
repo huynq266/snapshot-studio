@@ -30,7 +30,12 @@
     // stage — the only way to get a pixel-accurate compositor screenshot — which is a hard
     // visual cut if it lands on an unveiled screen. The veil fades in first and eats that
     // cut, then fades back out once the normal layout has repainted behind it.
-    async function renderToPngDataUrl() {
+    // `strict` is snap-bridge's own knob (see src/bridge-editor.js's cmdExport): the
+    // manual download/copy paths keep the original toast-and-continue behavior — a
+    // cropped export a person can see and immediately redo — but an unattended caller
+    // reading the returned PNG has no toast to read, so it needs a thrown error instead
+    // of a silently short image.
+    async function renderToPngDataUrl({ strict = false } = {}) {
       const veil = $('#renderVeil');
       veil.classList.add('show');
       await new Promise((r) => setTimeout(r, 130));   // let the veil's own fade-in finish
@@ -39,9 +44,18 @@
       // actually painted before the compositor screenshot fires
       await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
       if (document.fonts && document.fonts.ready) { try { await document.fonts.ready; } catch (e) {} }
+      // captureVisibleTab is a real compositor screenshot: it sees exactly what is
+      // painted, veil included. The veil (z-index 1000, opaque --paper) has to have
+      // actually finished fading out, not just started, or the "export" is that flat
+      // rectangle — this bit every export in V1, since captureVisibleTab was never
+      // exercised end-to-end before. Cover again immediately once the shot is in hand,
+      // same 130ms the entry fade uses, so the chrome snapping back stays hidden too.
+      veil.classList.remove('show');
+      await new Promise((r) => setTimeout(r, 130));
       let res;
       try { res = hasExt ? await chrome.runtime.sendMessage({ type: 'capture-for-export' }) : { error: 'not running as an extension' }; }
       finally {
+        veil.classList.add('show');
         document.body.classList.remove('render');
         // one more frame so the restored layout is painted behind the veil before it lifts
         await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
@@ -55,10 +69,15 @@
       const wantW = Math.round(box.width * dpr), wantH = Math.round(box.height * dpr);
       const availW = Math.round(document.documentElement.clientWidth * dpr), availH = Math.round(document.documentElement.clientHeight * dpr);
       if (wantW > availW || wantH > availH) {
-        toast(`Browser window is smaller than the export (${Math.round(box.width)}×${Math.round(box.height)}px) — the image gets cropped. Enlarge the window, then export again for the full frame.`, 5000);
+        const msg = `Browser window is smaller than the export (${Math.round(box.width)}×${Math.round(box.height)}px) — the image would be cropped. Enlarge the window, then export again for the full frame.`;
+        if (strict) throw new Error(msg);
+        toast(msg, 5000);
       }
       return cropDataUrl(res.dataUrl, 0, 0, Math.min(wantW, availW), Math.min(wantH, availH));
     }
+    // Exposed for src/bridge-editor.js — the download button and Ctrl+C/copy below
+    // are the only other callers, and both keep calling it with no arguments.
+    window.SnapKit.export.renderToPngDataUrl = renderToPngDataUrl;
 
     function fileSlug() {
       const capture = getCapture();

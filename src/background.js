@@ -89,11 +89,34 @@ async function captureWholeTab() {
 }
 
 // ---- region snap ------------------------------------------------------------
+/* The accent the editor's picker last stored, or null for "kit default". Same
+   'accentColor' key accent-ramp.js reads — the service worker can't just call its
+   load(), because that module is a window script and a worker has no window. */
+async function pickedAccent() {
+  try { return (await chrome.storage.local.get('accentColor')).accentColor || null; }
+  catch (e) { return null; }
+}
+
 async function startRegionCapture() {
   const { tab, error } = await resolveTarget();
   if (error) return { error };
   try {
-    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['src/region-select.js'] });
+    /* Three things go into the page, in this order, and the order is the point.
+       1. The picked accent, as a plain global. The overlay is built synchronously the
+          moment its file runs, so anything it has to await would paint kit-blue first
+          and re-tone a frame later — under the cursor, that flash is very visible.
+          Reading storage HERE, before any injection, means the first paint is right.
+       2. accent-ramp.js, so the overlay derives its glow from the same ramp every other
+          surface reads instead of carrying its own copy of the maths (and of the kit
+          default, which lives there too).
+       3. The overlay itself. Same isolated world as 1 and 2, so it just reads them. */
+    const hex = await pickedAccent();
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: (h) => { window.__snapStudioAccent = h || null; },
+      args: [hex],
+    });
+    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['src/accent-ramp.js', 'src/region-select.js'] });
   } catch (e) {
     // Common cause: a page the browser allows *navigating* to but not *scripting* (e.g. a PDF viewer).
     return { error: `Can’t draw a selection box on this page (${String(e && e.message || e)}). Try “Snap visible tab” instead.` };
@@ -158,3 +181,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 });
+
+// snap-bridge: local MCP <-> WebSocket bridge, see KB-BRIDGE.md at the repo root.
+// importScripts() runs synchronously in this same global scope, so
+// bridge-worker.js reuses shootVisibleTab()/ensureEditor()/resolveTarget()/
+// capturable()/wait()/EDITOR_URL above rather than redefining them.
+importScripts('bridge-worker.js');

@@ -14,7 +14,7 @@
      component, every editor-chrome button, reads those vars rather than a literal hex,
      so this alone re-tones the entire app — placed right after tokens.css so it always
      wins the cascade over the kit's own :root block, however tokens.css itself is
-     re-vendored later. Written by editor.js's applyAccent(). -->
+     re-vendored later. Written by accent.js's applyAccent(); the popup builds the same block from accent-ramp.js. -->
 <style id="accentVars"></style>
 <link rel="stylesheet" href="editor.css">
 <!-- Rules for components authored in the Components tab. Written by editor.js from
@@ -39,7 +39,9 @@
     <nav class="viewtabs" id="viewTabs">
       <button class="vtab on" data-view="snap">Snap</button>
       <button class="vtab" data-view="lab">Components</button>
+      <button class="vtab" data-view="kb">KB</button>
     </nav>
+    <div class="kb-banner" id="kbBanner" hidden>⚙ KB job running — the Snap canvas is being driven automatically.</div>
     <div class="spacer"></div>
     <div class="tb-actions" data-for="snap">
       <label class="stamp-toggle"><input type="checkbox" id="frameToggle" checked> Image frame</label>
@@ -51,6 +53,11 @@
       <span class="tb-note">Components you make live only in this browser profile</span>
       <button id="labNew" class="btn sm">+ New component</button>
       <button id="labCopyCss" class="btn primary" title="Copy the CSS of every custom component, ready to paste into tokens.css">⧉ Copy CSS</button>
+    </div>
+    <div class="tb-actions" data-for="kb">
+      <span class="tb-note" id="kbStatusNote">No job running</span>
+      <button id="kbStopBtn" class="btn sm" hidden>■ Stop</button>
+      <button id="kbStartBtn" class="btn primary" disabled>▶ Start</button>
     </div>
   </header>
 
@@ -172,9 +179,25 @@
       <div id="labProps"></div>
     </aside>
   </main>
+
+  <!-- ============ KB tab: topology B — spawn an agent to build a KB article ============ -->
+  <main class="kb">
+    <aside class="kb-rail">
+      <h3>Spec document</h3>
+      <button id="kbUploadBtn" class="btn sm block">Choose .md file…</button>
+      <p class="kb-filename" id="kbFilename">No file chosen.</p>
+      <h3>Allowed domain</h3>
+      <input type="text" id="kbDomainInput" class="kb-domain-input" placeholder="e.g. portal.example.com">
+      <p class="empty-hint">Required. The agent may only navigate within this domain or path — everything else is denied, and it's told to stop and report instead of trying to go around it. See <code>KB-BRIDGE.md</code> mục 7.</p>
+    </aside>
+    <div class="kb-log-wrap">
+      <div class="kb-log" id="kbLog"><p class="empty-hint">Choose a spec file and an allowed domain, then hit Start. Progress from the agent — what it navigates to, what it annotates, what it writes — appears here as it happens.</p></div>
+    </div>
+  </main>
 </div>
 <input type="file" id="fileInput" accept="image/*" hidden />
 <input type="file" id="mdInput" accept=".md,.markdown,text/markdown" hidden />
+<input type="file" id="kbMdInput" accept=".md,.markdown,text/markdown" hidden />
 <div class="render-veil" id="renderVeil"></div>
 <div class="toast" id="toast"></div>
 <script src="kit-catalog.js"></script>
@@ -190,9 +213,12 @@
 <script src="components/image.js"></script>
 <script src="components/custom.js"></script>
 <script src="context-stamp.js"></script>
+<script src="accent-ramp.js"></script>
 <script src="accent.js"></script>
 <script src="export.js"></script>
 <script src="lab.js"></script>
+<script src="bridge-editor.js"></script>
+<script src="bridge-kb.js"></script>
 <script src="editor.js"></script>
 </body>
 </html>
