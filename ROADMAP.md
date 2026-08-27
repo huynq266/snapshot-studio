@@ -5,7 +5,7 @@ thực tế** trong repo, và chia phần còn lại thành các bước triển
 
 - Đề xuất gốc: https://claude.ai/code/artifact/bb022e74-06c3-4396-98b5-e429ff224f52
 - Repo tiền thân: `github.com/pdtoan2811-bit/ownegoMarketingMaterialToolkit` → `tools/doc-guide/packages/userguidesnap`
-- Cập nhật lần cuối: 2026-08-24
+- Cập nhật lần cuối: 2026-08-26
 
 > Đề xuất ghi trạng thái *"ý tưởng, chưa triển khai"* — dòng đó đã lỗi thời. V1 đã có mã
 > chạy được. Tài liệu này là nguồn sự thật mới về tiến độ.
@@ -94,12 +94,16 @@ Việc nhỏ, nhưng **chặn việc dùng thật**. Nên làm trước tất c�
       snap toàn tab → snap vùng → thêm cả 7 component → kéo/resize → export → copy.
       *Đây là việc số 1. Mọi mục dưới đây đều giả định V1 thực sự chạy.*
 
-- [ ] **Xoá `pendingCapture` sau khi editor đã nhận ảnh.**
-      `src/background.js:84,119` ghi ảnh vào `chrome.storage.local` nhưng **không nơi nào
-      xoá**. Ảnh chụp màn hình khách hàng nằm lại trong storage vô thời hạn, sống qua cả
-      lần khởi động lại trình duyệt. Đây chính là rủi ro "Dữ liệu khách hàng" mà mục 09
-      của đề xuất nêu — và nó đã hiện diện ngay ở V1, không đợi tới Snap Library.
-      → Gọi `chrome.storage.local.remove([...])` trong `loadCapture()` sau khi ảnh đã vào editor.
+- [x] **Xoá `pendingCapture` sau khi editor đã nhận ảnh.** (2026-08-27)
+      `src/background.js:84,119` ghi ảnh vào `chrome.storage.local` nhưng không nơi nào
+      xoá — sống qua cả lần khởi động lại trình duyệt, và **cũng chính là nguyên nhân**
+      của bug "reload mất hết tab, chỉ còn tab mới nhất": mỗi lần load lại trang, khối
+      này replay y nguyên ảnh cuối cùng thành MỘT tab "ma", đè lên bất cứ gì phiên làm
+      việc có khôi phục được. `editor.js`'s bottom wiring giờ gọi
+      `chrome.storage.local.remove([...])` ngay sau khi tiêu thụ `pendingCapture` một lần.
+      Đi kèm bên dưới: `restoreSession()` — khôi phục cả dải tab từ IndexedDB
+      (`SnapKit.library.saveSession()`/`loadSession()`, store `session` mới trong
+      `src/library.js`) trước khi khối `pendingCapture` này chạy.
 
 - [ ] **Thêm icon cho extension.** `manifest.json` không khai báo `icons` lẫn
       `action.default_icon` → hiện icon mảnh ghép xám mặc định. Repo tiền thân có sẵn bộ
@@ -118,12 +122,32 @@ Việc nhỏ, nhưng **chặn việc dùng thật**. Nên làm trước tất c�
 
 Mục tiêu: *ảnh chụp có chỗ sống và có đường ra.*
 
-- [ ] **Thư viện lịch sử (Snap Library).** Hiện tại snap ảnh mới là **đè mất** ảnh cũ —
-      phải export/copy trước khi chụp tiếp. Dựng lại từ giao diện job-board của Guide Studio.
-      Cần quyết chỗ lưu: `IndexedDB` trong extension, hay một server nhỏ.
-- [ ] **Chính sách lưu trữ / tự xoá.** Không tách khỏi mục trên — ảnh support gần như
-      chắc chắn chứa dữ liệu khách hàng. Phải chốt hạn lưu + ai được xem *trước khi* bật
-      thư viện, không phải sau.
+- [x] **Thư viện lịch sử (Snap Library).** Đã dựng: tab **Library** thứ ba trong topbar
+      (cạnh Snap/Components), `src/library.js`. Chỗ lưu đã quyết: **IndexedDB trong
+      extension, không server** (theo hướng chỉ-trong-máy của "Quyết định còn treo" #2 —
+      chưa có backend nào trong repo này, và job-board/share-link vẫn cần một cái nếu làm
+      tiếp). Nút **Save to library** trong toolbar là đường ghi DUY NHẤT vào Library.
+      **2026-08-26 — đổi cơ chế nguồn:** cơ chế đè mất của V1 sửa tận gốc theo cách khác,
+      không còn dựa vào Library làm nơi giữ duy nhất. `editor.js` có một dải tab chụp
+      (`#snapTabs`/`renderTabs()`) phía trên canvas — snap mới, và mở lại một mục từ
+      Library, đều mở như MỘT TAB MỚI (`captures` array), giữ nguyên tab đang có để chuyển
+      qua lại và copy chéo, thay vì gọi `finishCaptureSwap()` để ghi đè `capture` như trước.
+      **2026-08-27 — bỏ auto-save, chỉ lưu khi bấm nút (trực tiếp theo yêu cầu):** trước đó
+      ba đường vứt capture thật sự (đóng tab, **Replace base image…**, và crop) đều tự gọi
+      `SnapKit.library.autoSaveOutgoing()` trước khi mất — cùng với dedup qua `WeakMap` để
+      mở lại một mục không tự nhân bản. Cả hai phần đó đã bị bỏ: `autoSaveOutgoing()`,
+      `markClean()`, `savedSnapshotOf` không còn trong `library.js`; `saveSnapshot()` giờ
+      luôn ghi một bản ghi mới, không điều kiện. Library giờ chỉ có MỘT đường ghi — nút
+      **Save to library** — không có backstop tự động nào nữa. Đóng tab và **Replace base
+      image…** giờ hỏi xác nhận thẳng ("...unless you already saved it to the Library")
+      thay vì ngầm định là an toàn; crop thì không hỏi (không xoá annotation nào, chỉ dịch
+      toạ độ), xem `applyCrop()`.
+- [x] **Chính sách lưu trữ / tự xoá.** Không tách khỏi mục trên, làm cùng lúc, không phải
+      sau. Mặc định **giữ 14 ngày**, chỉnh được 7/14/30/không bao giờ ngay trong tab
+      Library; hạ xuống một mốc ngắn hơn thì xoá phần quá hạn ngay, không đợi lần mở sau.
+      "Ai được xem": vì chọn không server, câu trả lời là *chỉ máy này* — không đồng bộ,
+      không link chia sẻ, không nơi thứ hai nào đọc được — nói thẳng trong UI của tab
+      Library, không giả định người dùng tự suy ra.
 - [ ] **Đính thẳng vào Zendesk/Intercom/Slack**, theo kiểu "degrade loudly" mà repo tiền
       thân đã dùng cho các API key tùy chọn.
 - [ ] **Link chia sẻ.** Hạng mục V1 duy nhất bị bỏ lại. Cần server → xem "Quyết định còn treo" #2.
@@ -202,9 +226,13 @@ toolkit rồi copy tay sang. Component Forge cần đọc/ghi trực tiếp `cat
 nên hoặc nhập lại repo, hoặc phải dựng một cơ chế đồng bộ hai chiều — việc mà đề xuất đã
 cố tình tránh.
 
-**2. V2 có server hay không?** Link chia sẻ, Snap Library dùng chung, và tích hợp ticket
-đều cần nơi lưu ngoài trình duyệt. Nếu quyết "không server", cả ba phải thiết kế lại theo
-hướng chỉ-trong-máy (IndexedDB + export tay).
+**2. V2 có server hay không?** *(một phần đã quyết — xem dưới)*
+Link chia sẻ, Snap Library dùng chung, và tích hợp ticket đều cần nơi lưu ngoài trình
+duyệt. Phần **Snap Library** đã chốt: **không server**, `IndexedDB` chỉ-trong-máy (xem
+mục V2 ở trên) — quyết định này chỉ có hiệu lực cho lịch sử snap của MỘT máy/MỘT profile
+trình duyệt. Hai phần còn lại của câu hỏi vẫn treo nguyên: **link chia sẻ** và **Snap
+Library dùng chung giữa nhiều người/máy** đều đòi hỏi thứ mà chỉ-trong-máy không cho
+được — cả hai vẫn cần server nếu làm.
 
 **3. Link chia sẻ có hết hạn / có bắt đăng nhập không?** Đặc biệt quan trọng khi ảnh có
 dữ liệu khách hàng và link lỡ lọt ra ngoài kênh nội bộ.

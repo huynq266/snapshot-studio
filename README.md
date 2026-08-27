@@ -17,8 +17,10 @@ deliberate cut, not an oversight — see "What this is NOT" below.
 1. Chrome → `chrome://extensions` → enable **Developer mode** → **Load unpacked** → select
    this repo's root folder.
 2. Click the extension icon on any normal page → **Snap visible tab** (or **Snap a
-   region…**, or the shortcuts `Alt+Shift+S` / `Alt+Shift+R`). A **Snap Studio** tab opens
-   with the capture already dropped in.
+   region…**, or the shortcuts `Alt+Shift+S` / `Alt+Shift+R`). A **Snap Studio** browser tab
+   opens with the capture already dropped in. Snapping again — from the same page or a
+   different one — never overwrites it: the new capture opens as its own tab in the strip
+   above the canvas, and the old one stays right there to switch back to and copy from.
 3. Add components from the left rail, drag them into place, edit text/options on the
    right. Toggle **Context stamp** in the topbar on/off.
 4. **⧉ Copy image** — or just `Ctrl+C` with the stage focused — to paste straight into a
@@ -34,9 +36,20 @@ deliberate cut, not an oversight — see "What this is NOT" below.
    itself (**Base image** — selectable, not deletable, since it sets the exported frame).
    Pasted images always sit below the annotations so a new one can't bury a text-box or
    highlight you already placed.
-7. The **Components** tab (topbar, next to **Snap**) is the kit itself: every component on
-   a light ground, a dark ground, or your live capture — and **+ New component** to author
-   a new one. Anything you make there shows up in the Snap rail under **Yours**.
+7. The tab strip above the canvas holds every capture you've snapped, uploaded, or reopened
+   from the Library this session — click one to switch to it (to copy an image or a layer
+   across), or **✕** on it to close it. Closing a tab, **Replace base image…** in the base
+   layer's panel, and applying a crop all discard a capture (or its pre-crop pixels) for
+   good — on direct instruction none of them save to the Library for you; each one confirms
+   first (crop doesn't, since it never drops an annotation) rather than pretending there's a
+   safety net. **⤓ Save to library** in the toolbar is the only thing that ever writes there —
+   click it before you close/replace/crop if you want the capture to survive that. Click a
+   card in the Library to reopen it as a new tab with every annotation intact. Saved snaps
+   auto-expire (14 days by default — change it, or turn it off, in the tab's Retention
+   setting) and never leave this browser profile.
+8. The **Components** tab (topbar) is the kit itself: every component on a light ground, a
+   dark ground, or your live capture — and **+ New component** to author a new one.
+   Anything you make there shows up in the Snap rail under **Yours**.
 
 ## How export actually works (read this before debugging a blank/cut-off PNG)
 
@@ -60,8 +73,13 @@ honestly than to fight that.
 
 ## What this is NOT (yet)
 
-- **No persistence.** Snapping a new capture replaces the one on screen. Export/copy
-  *before* you snap the next thing. A history library is V2 ("Snap Library" in the proposal).
+- **No server, no cross-device history, no automatic saving.** The **Library** tab (V2's
+  "Snap Library") only ever gets written to by the user clicking **⤓ Save to library** — on
+  direct instruction, closing a tab, **Replace base image…**, and cropping do NOT save there
+  for you; the first two confirm before discarding instead. It's `chrome.storage`'s cousin,
+  not a server: history lives in this one browser profile only, auto-expires (14/7/30 days,
+  or never, set in the Library tab), and there is no share link and no sync between machines.
+  See `src/library.js` and `ROADMAP.md`'s V2 section.
 - **No connector wiring.** The kit's `__connector` parts — text-box's and
   zoom-magnify's optional relocate-with-a-line-back mode, and the arrow's own
   anchor-dot convention they both cite — exist in `tokens.css` but nothing in

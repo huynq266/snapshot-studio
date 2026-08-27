@@ -4,3 +4,5 @@ Thumbs.db
 *.log
 snap-bridge/.token
 /kb/
+*.zip
+.claude/settings.json

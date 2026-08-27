@@ -38,16 +38,28 @@
     </div>
     <nav class="viewtabs" id="viewTabs">
       <button class="vtab on" data-view="snap">Snap</button>
+      <button class="vtab" data-view="library">Library</button>
       <button class="vtab" data-view="lab">Components</button>
       <button class="vtab" data-view="kb">KB</button>
     </nav>
     <div class="kb-banner" id="kbBanner" hidden>⚙ KB job running — the Snap canvas is being driven automatically.</div>
     <div class="spacer"></div>
-    <div class="tb-actions" data-for="snap">
-      <label class="stamp-toggle"><input type="checkbox" id="frameToggle" checked> Image frame</label>
+    <div class="tb-actions" data-for="snap" id="snapActions">
+      <label class="stamp-toggle"><input type="checkbox" id="frameToggle"> Image frame</label>
       <label class="stamp-toggle"><input type="checkbox" id="stampToggle"> Context stamp</label>
+      <button id="cropBtn" class="btn sm" title="Crop the base image to a new frame">⛶ Crop</button>
       <button id="copyImg" class="btn sm" title="Copy the annotated image (Ctrl+C)">⧉ Copy image</button>
       <button id="downloadPng" class="btn primary" title="Export the annotated PNG">⬇ Export PNG</button>
+    </div>
+    <div class="tb-actions" data-for="snap" id="cropActions" hidden>
+      <span class="tb-note">Drag the frame to size the crop — <span class="kbd">Esc</span> cancels, <span class="kbd">Enter</span> applies.</span>
+      <span class="spacer"></span>
+      <button id="cropCancelBtn" class="btn sm">Cancel</button>
+      <button id="cropApplyBtn" class="btn primary sm">Apply crop</button>
+    </div>
+    <div class="tb-actions" data-for="library">
+      <span class="tb-note" id="libCountNote"></span>
+      <button id="libSaveCurrent" class="btn sm" title="Snapshot the current capture into the library without leaving it">⤓ Save to library</button>
     </div>
     <div class="tb-actions" data-for="lab">
       <span class="tb-note">Components you make live only in this browser profile</span>
@@ -76,35 +88,50 @@
       </div>
       <h3>Yours <span id="customPalCount" class="kbd"></span></h3>
       <div class="palette" id="customPalette"></div>
-      <p class="empty-hint">Click to drop a component in the middle of the shot, then drag it into place. <span class="kbd">⌫</span> deletes the selected one, <span class="kbd">Ctrl</span> <span class="kbd">C</span> copies the finished image, <span class="kbd">Ctrl</span> <span class="kbd">V</span> pastes another image in as its own layer.</p>
+      <p class="empty-hint">Click a component to add it. Highlight, Spotlight, Zoom and Blur switch the cursor to a crosshair — click-drag on the shot to draw them at the size and spot you want; everything else drops in the middle of the shot for you to drag into place. <span class="kbd">⌫</span> deletes the selected one, <span class="kbd">Ctrl</span> <span class="kbd">C</span> copies the finished image, <span class="kbd">Ctrl</span> <span class="kbd">V</span> pastes another image in as its own layer.</p>
       <h3>Layers <span id="layerCount" class="kbd"></span></h3>
       <div id="layers" class="layers-list"></div>
     </aside>
 
     <div class="stage-wrap" id="stageWrap">
-      <div class="stage-scaler" id="scaler">
-        <!-- screenshot-canvas anatomy: #stage IS the padded canvas layer, #baseImg
-             wears the rounded frame class. #canvas is a sibling of the image, not a
-             child of the frame, so an annotation may hang off the shot without being
-             clipped by the frame's own radius. -->
-        <div class="stage" id="stage">
-          <div class="shot-wrap" id="shotWrap">
-            <img id="baseImg" alt="" />
-            <div class="canvas" id="canvas"></div>
+      <!-- One tab per open capture — a new snap opens here instead of replacing
+           whatever is already on screen, so the previous shot stays around to
+           switch back to and copy from. Filled by editor.js's renderTabs(). -->
+      <div class="snap-tabs" id="snapTabs"></div>
+      <div class="stage-scroll" id="stageScroll">
+        <div class="stage-scaler" id="scaler">
+          <!-- screenshot-canvas anatomy: #stage IS the padded canvas layer, #baseImg
+               wears the rounded frame class. #canvas is a sibling of the image, not a
+               child of the frame, so an annotation may hang off the shot without being
+               clipped by the frame's own radius. -->
+          <div class="stage" id="stage">
+            <div class="shot-wrap" id="shotWrap">
+              <img id="baseImg" alt="" />
+              <div class="canvas" id="canvas"></div>
+              <div id="cropLayer" hidden>
+                <div class="crop-frame" id="cropFrame">
+                  <span class="crop-dims" id="cropDims"></span>
+                  <div class="crop-handle" data-h="nw"></div>
+                  <div class="crop-handle" data-h="ne"></div>
+                  <div class="crop-handle" data-h="se"></div>
+                  <div class="crop-handle" data-h="sw"></div>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
-      </div>
-      <div id="dropHint" class="drop-hint">
-        <p><b>No capture yet.</b></p>
-        <p>Use the toolbar button (📸 whole tab, or ▭ region) on the page you want to document — it opens here automatically.</p>
-        <p>Or paste one straight in with <span class="kbd">Ctrl</span> <span class="kbd">V</span> — anything already on your clipboard, from any app.</p>
-        <button id="uploadBtn" class="btn">Or upload an image…</button>
-      </div>
-      <div class="zoom-hud" id="zoomHud">
-        <button class="btn ghost sm" id="zoomOut">−</button>
-        <b id="zoomLbl">Fit</b>
-        <button class="btn ghost sm" id="zoomIn">+</button>
-        <button class="btn ghost sm" id="zoomFit">Fit</button>
+        <div id="dropHint" class="drop-hint">
+          <p><b>No capture yet.</b></p>
+          <p>Use the toolbar button (📸 whole tab, or ▭ region) on the page you want to document — it opens here automatically.</p>
+          <p>Or paste one straight in with <span class="kbd">Ctrl</span> <span class="kbd">V</span> — anything already on your clipboard, from any app.</p>
+          <button id="uploadBtn" class="btn">Or upload an image…</button>
+        </div>
+        <div class="zoom-hud" id="zoomHud">
+          <button class="btn ghost sm" id="zoomOut">−</button>
+          <b id="zoomLbl">Fit</b>
+          <button class="btn ghost sm" id="zoomIn">+</button>
+          <button class="btn ghost sm" id="zoomFit">Fit</button>
+        </div>
       </div>
     </div>
 
@@ -124,9 +151,12 @@
         <button class="swatch" type="button" data-hex="#390376" style="--sw:#390376" title="#390376"></button>
         <button class="swatch" type="button" data-hex="#06063F" style="--sw:#06063F" title="#06063F"></button>
         <button class="swatch" type="button" data-hex="#282828" style="--sw:#282828" title="#282828"></button>
-        <label class="swatch swatch-custom" id="accentCustomSwatch" title="Pick another colour…">
-          <input type="color" id="accentCustomInput" value="#1350de">
-        </label>
+        <span class="swatch-custom-group">
+          <span class="swatch-custom-label">Custom color</span>
+          <label class="swatch swatch-custom" id="accentCustomSwatch" title="Pick another colour…">
+            <input type="color" id="accentCustomInput" value="#1350de">
+          </label>
+        </span>
       </div>
       <div class="accent-status">
         <code id="accentHexLabel">#1350DE</code>
@@ -180,6 +210,31 @@
     </aside>
   </main>
 
+  <!-- ============ Library tab: history of past snaps (V2) ============ -->
+  <main class="library">
+    <aside class="lab-rail">
+      <h3>Retention</h3>
+      <div class="prop-row">
+        <label>Auto-delete saved snaps after</label>
+        <select id="libRetention">
+          <option value="7">7 days</option>
+          <option value="14" selected>14 days</option>
+          <option value="30">30 days</option>
+          <option value="0">Never (not recommended)</option>
+        </select>
+      </div>
+      <p class="empty-hint">Saved snaps live only in this browser profile's storage — nobody else can see them from here, and there is no share link. They often carry customer data from a ticket, so keep this window short and clear the library once a ticket is resolved.</p>
+      <h3>Storage</h3>
+      <p class="empty-hint" id="libStorageNote">—</p>
+      <button class="btn sm block" id="libClearAll">Clear library…</button>
+    </aside>
+
+    <div class="library-grid-wrap">
+      <div class="library-grid" id="libraryGrid"></div>
+      <p class="empty-hint" id="libraryEmpty">Nothing saved yet. Saving here only ever happens when you click <b>Save to library</b> in the Snap tab's toolbar — closing a tab, replacing the base image, or cropping does not save it for you.</p>
+    </div>
+  </main>
+
   <!-- ============ KB tab: topology B — spawn an agent to build a KB article ============ -->
   <main class="kb">
     <aside class="kb-rail">
@@ -216,6 +271,7 @@
 <script src="accent-ramp.js"></script>
 <script src="accent.js"></script>
 <script src="export.js"></script>
+<script src="library.js"></script>
 <script src="lab.js"></script>
 <script src="bridge-editor.js"></script>
 <script src="bridge-kb.js"></script>

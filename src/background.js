@@ -41,11 +41,27 @@ async function resolveLastApp() {
   return null;
 }
 
-/** The tab to act on: the active tab if it's a normal page, else the last one we saw that was. */
+/* `lastApp` is only populated by the onActivated/onUpdated listeners below, so it's empty
+   until one of those events fires at least once *after* the service worker started listening.
+   A tab that was already open and already active — e.g. the user's ticket tab sitting in a
+   second window when the extension was just installed/reloaded, or a session-storage cold
+   start — never fires either event, so `lastApp` stays null even though a perfectly capturable
+   tab is right there. Scan every window's active tab as a last resort before giving up. */
+async function findAnyCapturableTab() {
+  try {
+    const tabs = await chrome.tabs.query({ active: true });
+    const found = tabs.find((t) => capturable(t.url));
+    if (found) return { tabId: found.id, windowId: found.windowId };
+  } catch (e) {}
+  return null;
+}
+
+/** The tab to act on: the active tab if it's a normal page, else the last one we saw that was,
+ * else any other capturable tab that happens to be active in some other window. */
 async function resolveTarget() {
   let [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
   if (tab && capturable(tab.url)) return { tab, error: null };
-  const cand = await resolveLastApp();
+  const cand = (await resolveLastApp()) || (await findAnyCapturableTab());
   if (!cand) return { tab: null, error: `Can’t capture ${tab ? uncapturable(tab.url) : 'the current tab'}. Switch to your app’s tab, then Snap.` };
   try { await chrome.tabs.update(cand.tabId, { active: true }); } catch (e) {}
   try { await chrome.windows.update(cand.windowId, { focused: true }); } catch (e) {}

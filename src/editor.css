@@ -34,7 +34,7 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink);
 .palette-rail, .panel, .lab-rail { background: var(--surface); overflow-y: auto; padding: var(--space-4) 14px; }
 .palette-rail { border-right: 1px solid var(--line); }
 .panel { border-left: 1px solid var(--line); }
-.palette-rail h3, .panel h3, .lab-rail h3 { font-size: 11px; font-weight: var(--weight-bold); letter-spacing: .06em; text-transform: uppercase;
+.palette-rail h3, .panel h3, .lab-rail h3, .swatch-custom-label { font-size: 11px; font-weight: var(--weight-bold); letter-spacing: .06em; text-transform: uppercase;
   color: var(--muted); margin: 0 0 10px; display: flex; align-items: center; gap: var(--space-2); }
 .palette-rail h3:not(:first-child), .lab-rail h3:not(:first-child) { margin-top: 22px; }
 
@@ -57,8 +57,31 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink);
 .layer-row .ldel:hover { opacity: 1; }
 
 /* ---- stage ------------------------------------------------------------ */
-.stage-wrap { position: relative; overflow: auto; background: var(--paper); display: flex; align-items: center; justify-content: center; }
+/* Column flex: the tab strip is a fixed-height row on top, .stage-scroll takes
+   the rest and owns the scrolling/centering .stage-wrap used to do alone. */
+.stage-wrap { position: relative; overflow: hidden; background: var(--paper); display: flex; flex-direction: column; }
+.stage-scroll { position: relative; flex: 1; min-height: 0; overflow: auto; display: flex; align-items: center; justify-content: center; }
 .stage-scaler { padding: var(--space-10); display: flex; align-items: center; justify-content: center; }
+
+/* ---- capture tabs ------------------------------------------------------
+   One per open capture (see editor.js's renderTabs()). A new snap opens as a
+   new tab rather than overwriting whatever is already open, so switching back
+   to an earlier one — to copy an image or a layer across — is just a click. */
+.snap-tabs { flex: none; display: flex; align-items: center; gap: var(--space-2); padding: var(--space-2) var(--space-3);
+  overflow-x: auto; background: var(--surface); border-bottom: 1px solid var(--line); }
+.snap-tabs:empty { display: none; }
+.snap-tab { display: flex; align-items: center; gap: 7px; flex: none; max-width: 190px; padding: 5px 6px 5px 5px;
+  border-radius: 9px; border: 1px solid var(--line-2); background: var(--paper); cursor: pointer; font-family: inherit; }
+.snap-tab:hover { border-color: var(--accent-line); }
+.snap-tab.on { background: var(--accent-soft); border-color: var(--accent-line); }
+.snap-tab-thumb { width: 26px; height: 20px; object-fit: cover; border-radius: var(--radius-sm); flex: none;
+  display: block; background: var(--color-neutral-0); border: 1px solid var(--line); }
+.snap-tab-label { font-size: var(--text-xs); font-weight: var(--weight-semibold); color: var(--ink);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.snap-tab-close { flex: none; width: 16px; height: 16px; display: grid; place-items: center; border-radius: 50%;
+  font-size: 10px; line-height: 1; color: var(--muted); opacity: 0; transition: opacity .12s var(--ease), background .12s var(--ease); }
+.snap-tab:hover .snap-tab-close, .snap-tab.on .snap-tab-close { opacity: .6; }
+.snap-tab-close:hover { opacity: 1; background: var(--down); color: var(--color-neutral-0); }
 /* #stage doubles as the screenshot-canvas layer when the frame is on, so it must
    shrink-wrap its content rather than carry an explicit size — the padding then
    just appears, with no geometry to recompute. */
@@ -70,11 +93,17 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink);
 .stage img#baseImg { display: block; max-width: none; pointer-events: none; user-select: none; }
 .canvas { position: absolute; inset: 0; }
 
-/* full-bleed, no chrome, exact natural size — the state captured for export */
-body.render .topbar, body.render .body > aside, body.render .zoom-hud, body.render #dropHint { display: none !important; }
-body.render .stage-wrap { position: fixed; inset: 0; overflow: hidden; padding: 0; background: var(--color-neutral-0); display: block; }
-body.render .stage-scaler { padding: 0; transform: none !important; display: block; }
-body.render .stage { position: fixed; left: 0; top: 0; box-shadow: none; border-radius: 0; }
+/* full-bleed, no chrome, exact natural size — the state captured for export. Stays
+   centered (.stage-scroll's own flex-centering, untouched here, since .snap-tabs is
+   hidden above and .stage-wrap is just its fixed-inset frame) rather than pinning to
+   the top-left corner: the veil has to come off for the actual shot
+   (see export.js), so whatever this looks like is what briefly hits the user's eye —
+   centered growth into natural size reads as a soft pop, a corner-pin reads as a jump. */
+body.render .topbar, body.render .body > aside, body.render .zoom-hud, body.render #dropHint, body.render .snap-tabs { display: none !important; }
+body.render .stage-wrap { position: fixed; inset: 0; overflow: hidden; padding: 0; background: var(--color-neutral-0); }
+body.render .stage-scroll { overflow: hidden; }
+body.render .stage-scaler { padding: 0; transform: none !important; }
+body.render .stage { box-shadow: none; border-radius: 0; }
 
 /* Covers the swap into/out of body.render above (chrome hidden, zoom reset to natural
    size) with a quick fade instead of a hard layout cut — export.js fades this in, waits
@@ -174,18 +203,25 @@ body.render .stage { position: fixed; left: 0; top: 0; box-shadow: none; border-
 .vtab.on { background: var(--surface); color: var(--ink); box-shadow: 0 1px 2px rgba(var(--color-neutral-900-rgb),.09); }
 
 .tb-actions { display: flex; align-items: center; gap: 10px; }
+/* Snap view swaps its own toolbar group for #cropActions via the plain `hidden`
+   attribute (editor.js's startCrop()/endCrop()) rather than a body.view-* class,
+   since both groups share data-for="snap". Without this, .tb-actions's own
+   `display: flex` — an author rule — outranks the [hidden] default from the
+   UA stylesheet at equal specificity, and a "hidden" toolbar shows up anyway. */
+.tb-actions[hidden] { display: none; }
 .tb-note { font-size: 11.5px; color: var(--muted); }
-body.view-snap .tb-actions[data-for="lab"], body.view-lab .tb-actions[data-for="snap"] { display: none; }
-body.view-snap .lab { display: none; }
-body.view-lab .body { display: none; }
-body.render .lab, body.render .viewtabs { display: none !important; }
-/* Third view (KB, topology B) added alongside the snap/lab pair above rather than
-   folded into it, so the original two-view rules stay exactly as they were. */
-body.view-snap .tb-actions[data-for="kb"], body.view-lab .tb-actions[data-for="kb"],
-body.view-kb .tb-actions[data-for="snap"], body.view-kb .tb-actions[data-for="lab"] { display: none; }
-body.view-snap .kb, body.view-lab .kb { display: none; }
-body.view-kb .body, body.view-kb .lab { display: none; }
-body.render .kb { display: none !important; }
+/* Four views (Snap, Components/lab, Library, KB) share this one pattern: hide every
+   other view's toolbar group and every other view's <main>, and never export any of
+   the three non-Snap chrome shells under body.render. */
+body.view-snap .tb-actions[data-for="lab"], body.view-snap .tb-actions[data-for="library"], body.view-snap .tb-actions[data-for="kb"],
+body.view-lab .tb-actions[data-for="snap"], body.view-lab .tb-actions[data-for="library"], body.view-lab .tb-actions[data-for="kb"],
+body.view-library .tb-actions[data-for="snap"], body.view-library .tb-actions[data-for="lab"], body.view-library .tb-actions[data-for="kb"],
+body.view-kb .tb-actions[data-for="snap"], body.view-kb .tb-actions[data-for="lab"], body.view-kb .tb-actions[data-for="library"] { display: none; }
+body.view-snap .lab, body.view-snap .library, body.view-snap .kb { display: none; }
+body.view-lab .body, body.view-lab .library, body.view-lab .kb { display: none; }
+body.view-library .body, body.view-library .lab, body.view-library .kb { display: none; }
+body.view-kb .body, body.view-kb .lab, body.view-kb .library { display: none; }
+body.render .lab, body.render .library, body.render .kb, body.render .viewtabs { display: none !important; }
 
 .btn.block { width: 100%; margin-top: var(--space-2); }
 .lab { flex: 1; display: grid; grid-template-columns: 216px 1fr 300px; min-height: 0; }
@@ -200,6 +236,8 @@ body.render .kb { display: none !important; }
   background: var(--sw); cursor: pointer; }
 .swatch:hover { box-shadow: 0 0 0 1px var(--line-2), 0 3px 8px -2px rgba(var(--color-neutral-900-rgb), .35); }
 .swatch.on { box-shadow: 0 0 0 1px var(--surface), 0 0 0 3px var(--sw); }
+.swatch-custom-group { display: inline-flex; flex-direction: column; align-items: center; gap: var(--space-1); }
+.swatch-custom-label { margin: 0; white-space: nowrap; }
 .swatch-custom { display: block; padding: 3px; border: 2px dashed var(--line-2); background: var(--surface);
   box-shadow: none; }
 .swatch-custom.on { border-style: solid; border-color: var(--ink); }
@@ -290,6 +328,35 @@ body.render .kb { display: none !important; }
 .lab-blurb { font-size: 12.5px; line-height: 1.6; color: var(--ink-2); margin: 0 0 14px; }
 .lab-blurb code { font-family: var(--mono); font-size: 11px; }
 
+
+/* =====================================================================
+   LIBRARY TAB — history of past snaps (V2 "Snap Library"). Same furniture
+   as the Components tab (.lab-rail is reused verbatim for the settings
+   rail); only the job-board grid of cards is new.
+   ===================================================================== */
+.library { flex: 1; display: grid; grid-template-columns: 216px 1fr; min-height: 0; }
+.library-grid-wrap { overflow-y: auto; padding: var(--space-4) var(--space-5); background: var(--paper); }
+.library-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: var(--space-4); align-content: start; }
+
+.snap-card { position: relative; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-xl);
+  overflow: hidden; cursor: pointer; box-shadow: var(--shadow-sm);
+  transition: box-shadow .15s var(--ease), border-color .15s var(--ease); }
+.snap-card:hover { box-shadow: var(--shadow-md); border-color: var(--accent-line); }
+.snap-card-thumb { aspect-ratio: 16 / 10; background: var(--paper); overflow: hidden; }
+.snap-card-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.snap-card-meta { padding: var(--space-2) var(--space-3) var(--space-3); display: flex; flex-direction: column; gap: 2px; }
+.snap-card-host { font-size: var(--text-sm); font-weight: var(--weight-semibold); color: var(--ink);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.snap-card-time { font-size: 11px; color: var(--muted); }
+/* Same corner convention as .el-del: hidden until the card is hovered, solid
+   red only once the pointer actually lands on it. */
+.snap-card-del { position: absolute; top: var(--space-2); right: var(--space-2); width: 24px; height: 24px;
+  display: grid; place-items: center; border-radius: 50%; border: none;
+  background: rgba(var(--color-neutral-900-rgb), .55); color: var(--color-neutral-0);
+  font-size: var(--text-xs); line-height: 1; cursor: pointer; opacity: 0;
+  transition: opacity .12s var(--ease), background .12s var(--ease); }
+.snap-card:hover .snap-card-del { opacity: 1; }
+.snap-card-del:hover { background: var(--down); }
 
 /* ---- the catalog's own words, in the Components panel --------------------- */
 .kit-doc { margin-top: 10px; border-top: 1px solid var(--line); padding-top: 10px; }

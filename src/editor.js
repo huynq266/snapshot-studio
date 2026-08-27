@@ -31,16 +31,20 @@
   const SnapKit = window.SnapKit = window.SnapKit || {};
 
   // ---- dom refs ----------------------------------------------------
-  const app = $('.app'), stage = $('#stage'), scaler = $('#scaler'), stageWrap = $('#stageWrap');
+  const app = $('.app'), stage = $('#stage'), scaler = $('#scaler'), stageScroll = $('#stageScroll');
   const baseImg = $('#baseImg'), canvas = $('#canvas'), dropHint = $('#dropHint'), shotWrap = $('#shotWrap');
   const props = $('#props'), propsTitle = $('#propsTitle'), layersEl = $('#layers'), layerCount = $('#layerCount');
   const zoomLbl = $('#zoomLbl'), toastEl = $('#toast'), fileInput = $('#fileInput'), stampToggle = $('#stampToggle');
+  const cropBtn = $('#cropBtn'), cropLayer = $('#cropLayer'), cropFrameEl = $('#cropFrame'), cropDimsEl = $('#cropDims');
+  const snapActions = $('#snapActions'), cropActions = $('#cropActions'), cropCancelBtn = $('#cropCancelBtn'), cropApplyBtn = $('#cropApplyBtn');
 
   // ---- state ---------------------------------------------------------
-  let capture = null;    // { id, url, capturedAt(Date), img:{dataUrl,w,h}, els:[] }
+  let capture = null;    // the ACTIVE tab's { id, url, capturedAt(Date), img:{dataUrl,w,h}, els:[] }
+  let captures = [];     // every open tab, in tab-strip order — see loadCapture()/renderTabs() below
   let selId = null;
   let zoom = 1;
   let placing = null;    // { cancel } while the palette's Arrow button is waiting for a click-drag on the shot
+  let cropState = null;  // { x, y, w, h } in image-space px while the crop-frame tool is open, else null
   let consumedIds = new Set();
 
   const uid = (p) => p + Math.random().toString(36).slice(2, 8);
@@ -220,6 +224,7 @@
     });
     shotWrap.classList.toggle('base-selected', selId === BASE_ID);
     renderLayers(); renderProps();
+    scheduleSessionSave();
   }
   function renderLayers() {
     layerCount.textContent = capture.els.length + 1;    // + the shot itself
@@ -350,6 +355,7 @@
     if (el.type === 'zoom') handles.forEach((h) => { if (h.classList.contains('radius')) positionRadiusHandle(h, el); });
     const host = handleHost(node, el);
     handles.forEach((h) => host.appendChild(h));
+    scheduleSessionSave();
   }
 
   /** Reorder inside the image stack only. Images are kept at the FRONT of `els` — the
@@ -372,10 +378,17 @@
     if (!capture.els.some((e) => e.type === 'stamp')) stampToggle.checked = false;
     render();
   }
+  // highlight/spotlight/zoom/blur only make sense over a specific region, so they
+  // draw-to-place like arrow instead of dropping at a fixed default spot (see
+  // startBoxPlacement() below). Every other addable type still drops centered.
+  const BOX_DRAW_TYPES = { highlight: 'Highlight Box', spotlight: 'Spotlight', zoom: 'Zoom / Magnify', blur: 'Privacy Blur' };
+
   function addElement(type) {
     if (!capture) { toast('No capture to annotate yet — snap or upload an image first.'); return; }
+    if (cropState) { toast('Finish or cancel the crop first.'); return; }
     if (placing) placing.cancel();          // a second palette click always wins over a pending one
     if (type === 'arrow') { startArrowPlacement(); return; }
+    if (BOX_DRAW_TYPES[type]) { startBoxPlacement(type); return; }
     const el = newElement(type);
     if (!el) { toast('That component no longer exists.'); SnapKit.lab.renderCustomPalette(); return; }
     capture.els.push(el);
@@ -396,10 +409,10 @@
    *  handles right after instead of saving the trip. This waits for a click-drag on the
    *  shot instead — press marks the tail, drag aims the head, release plants the tip. */
   function startArrowPlacement() {
-    stage.classList.add('placing-arrow');
+    stage.classList.add('placing');
     toast('Click the start point, drag to whatever you want to point at, then release. Press Esc to cancel.', 5000);
     const stopWaiting = () => {
-      stage.classList.remove('placing-arrow');
+      stage.classList.remove('placing');
       canvas.removeEventListener('pointerdown', begin, true);
       document.removeEventListener('keydown', onEsc, true);
       placing = null;
@@ -424,6 +437,67 @@
         // back to the old fixed default offset so it still reads as an arrow, tail
         // anchored at wherever was clicked.
         if (Math.hypot(el.x2 - el.x1, el.y2 - el.y1) < 4) { el.x2 = el.x1 + 150; el.y2 = el.y1 - 100; syncNode(el); }
+        renderProps();
+      };
+      window.addEventListener('pointermove', move);
+      window.addEventListener('pointerup', up);
+    };
+    canvas.addEventListener('pointerdown', begin, true);
+    document.addEventListener('keydown', onEsc, true);
+    placing = { cancel: stopWaiting };
+  }
+
+  /** zoom's x/y is its center point (style() renders it via translate(-50%,-50%));
+   *  every other box type's x/y is its top-left corner. Centralizing that one
+   *  distinction here lets startBoxPlacement() below draw all four types through
+   *  the same normalized-rect math. */
+  function applyDrawnRect(el, x1, y1, x2, y2) {
+    const x = Math.min(x1, x2), y = Math.min(y1, y2);
+    const w = Math.abs(x2 - x1), h = Math.abs(y2 - y1);
+    if (el.type === 'zoom') { el.x = x + w / 2; el.y = y + h / 2; el.w = w; el.h = h; }
+    else { el.x = x; el.y = y; el.w = w; el.h = h; }
+  }
+
+  /** Highlight/Spotlight/Zoom/Blur all frame a specific region, so — like arrow
+   *  above — they draw-to-place instead of dropping at a fixed default spot: press
+   *  marks one corner, drag aims the opposite corner, release plants the box. */
+  function startBoxPlacement(type) {
+    stage.classList.add('placing');
+    toast(`Click and drag to draw the ${BOX_DRAW_TYPES[type]}, or just click to drop it at the default size. Press Esc to cancel.`, 5000);
+    const stopWaiting = () => {
+      stage.classList.remove('placing');
+      canvas.removeEventListener('pointerdown', begin, true);
+      document.removeEventListener('keydown', onEsc, true);
+      placing = null;
+    };
+    const onEsc = (e) => { if (e.key === 'Escape') { e.preventDefault(); stopWaiting(); } };
+    const begin = (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault(); e.stopPropagation();
+      stopWaiting();
+      const el = newElement(type);
+      if (!el) { toast('That component no longer exists.'); SnapKit.lab.renderCustomPalette(); return; }
+      const defaultW = el.w, defaultH = el.h; // the type's normal fixed size, for the no-drag fallback below
+      const start = clientToCanvas(e.clientX, e.clientY);
+      applyDrawnRect(el, start.x, start.y, start.x, start.y);
+      capture.els.push(el);
+      select(el.id);
+      const move = (ev) => {
+        const p = clientToCanvas(ev.clientX, ev.clientY);
+        applyDrawnRect(el, start.x, start.y, p.x, p.y);
+        syncNode(el);
+      };
+      const up = () => {
+        window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up);
+        // A click with no real drag would leave a near-invisible sliver — fall back to
+        // the type's normal fixed size, centered on the click point instead of the
+        // image center (defaults()'s usual anchor for an instantly-dropped component).
+        if (el.w < 8 && el.h < 8) {
+          applyDrawnRect(el, start.x - defaultW / 2, start.y - defaultH / 2, start.x + defaultW / 2, start.y + defaultH / 2);
+        } else {
+          el.w = Math.max(24, el.w); el.h = Math.max(24, el.h); // matches the resize handle's own minimum
+        }
+        syncNode(el);
         renderProps();
       };
       window.addEventListener('pointermove', move);
@@ -475,6 +549,16 @@
     const el = capture.els.find((x) => x.id === node.dataset.id);
     const startX = e.clientX, startY = e.clientY;
     const orig = { ...el };
+    // Read once per drag, not per pointermove — the label's font/padding/border
+    // don't change mid-drag, only the height (and so the font size) does.
+    let stepMeasureCtx, stepFontFamily, stepFontWeight, stepHPad;
+    if (handle && el.type === 'step') {
+      const cs = getComputedStyle(node.querySelector('.cmp-step-marker'));
+      stepFontFamily = cs.fontFamily; stepFontWeight = cs.fontWeight;
+      stepHPad = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight)
+        + parseFloat(cs.borderLeftWidth) + parseFloat(cs.borderRightWidth);
+      stepMeasureCtx = document.createElement('canvas').getContext('2d');
+    }
     let move;
     if (handle && handle.dataset.h === 'radius') {
       // Only ever reachable while shape is 'rect' — the handle is hidden in circle
@@ -501,6 +585,17 @@
           // so the card grows with its own content); dy is ignored on purpose rather
           // than fighting that auto height right back down.
           el.w = Math.max(100, orig.w + dx);
+        } else if (el.type === 'step') {
+          // Height is free (font-size just tracks it — see step.js's inner()), but
+          // width has a text-driven floor: never let a drag shrink the pill past what
+          // "Step {n}" (or the bare numeral, in compact mode) actually needs at the
+          // font size that height implies, or the label spills past the rounded ends.
+          const h = Math.max(24, orig.h + dy);
+          const fontSize = Math.max(9, Math.round(h * 0.46));
+          stepMeasureCtx.font = `${stepFontWeight} ${fontSize}px ${stepFontFamily}`;
+          const minW = Math.ceil(stepMeasureCtx.measureText(stepLabel(el, el.compact)).width) + stepHPad;
+          el.w = Math.max(24, minW, orig.w + dx);
+          el.h = h;
         } else {
           el.w = Math.max(24, orig.w + dx); el.h = Math.max(24, orig.h + dy);
         }
@@ -537,6 +632,7 @@
   });
   document.addEventListener('keydown', (e) => {
     if (view !== 'snap') return;                   // ⌫ in the Components tab is just typing
+    if (cropState) return;                          // Esc/Enter own the keyboard while the crop frame is open
     if ((e.key === 'Backspace' || e.key === 'Delete') && selId) {
       if (isTyping()) return;
       e.preventDefault(); removeEl(selId);
@@ -554,7 +650,9 @@
   // ---- zoom ---------------------------------------------------------------
   function computeFit() {
     if (!capture) return 1;
-    const availW = stageWrap.clientWidth - 80, availH = stageWrap.clientHeight - 80;
+    // .stage-scroll, not #stageWrap — the tab strip above it eats real height that
+    // #stageWrap's own clientHeight would otherwise count as room for the image.
+    const availW = stageScroll.clientWidth - 80, availH = stageScroll.clientHeight - 80;
     return Math.max(0.05, Math.min(1, availW / capture.img.w, availH / capture.img.h));
   }
   function applyZoom(z) {
@@ -584,7 +682,12 @@
     return new Promise((resolve, reject) => { const img = new Image(); img.onload = () => resolve(img); img.onerror = reject; img.src = dataUrl; });
   }
 
-  async function loadCapture({ id, dataUrl, url, rect, note }) {
+  /** `replaceInPlace` is only ever passed by the "Replace base image…" upload
+   *  flow below — every other caller (the extension's capture pipeline, a
+   *  clipboard paste onto an empty stage) wants the new snap to open as its
+   *  OWN tab, leaving whatever was already open alone. See finishCaptureSwap's
+   *  comment for why. */
+  async function loadCapture({ id, dataUrl, url, rect, note, replaceInPlace }) {
     if (id && consumedIds.has(id)) return;
     if (id) consumedIds.add(id);
     let finalUrl = dataUrl;
@@ -593,19 +696,180 @@
       finalUrl = await cropDataUrl(dataUrl, Math.round(rect.x * dpr), Math.round(rect.y * dpr), Math.round(rect.w * dpr), Math.round(rect.h * dpr));
     }
     const img = await loadImage(finalUrl);
-    capture = { id: id || uid('cap_'), url: url || '', capturedAt: new Date(), img: { dataUrl: finalUrl, w: img.naturalWidth, h: img.naturalHeight }, els: [] };
-    baseImg.src = finalUrl;
+    const prev = capture;
+    // `el` is the already-decoded Image, kept around (not just w/h) so a component
+    // can drawImage() straight from it — privacy-blur's mosaic needs a synchronously
+    // readable source, and `baseImg`'s own <img> may not have finished decoding this
+    // dataUrl yet by the time render() runs right after this. Never serialized: the
+    // library (library.js's saveSnapshot) only ever reads .dataUrl/.w/.h off this
+    // object, so a live DOM node living here is safe to carry.
+    const next = { id: id || uid('cap_'), url: url || '', capturedAt: new Date(), img: { dataUrl: finalUrl, w: img.naturalWidth, h: img.naturalHeight, el: img }, els: [] };
+    capture = next;   // newElement()/centerXY() below read the module-level `capture`, so this has to happen first
+    if (stampToggle.checked) { const s = newElement('stamp'); s.text = SnapKit.contextStamp.stampText(capture); next.els.push(s); }
+    if (replaceInPlace && prev) {
+      const idx = captures.indexOf(prev);
+      captures[idx >= 0 ? idx : captures.length] = next;   // `prev` is discarded outright here — see fileInput's own confirm() for the warning
+    } else {
+      captures.push(next);
+    }
+    finishCaptureSwap(note || 'Capture loaded.');
+  }
+
+  /** Shared tail of every path that points `capture` at a (possibly new) object —
+   *  loadCapture above, the Library tab reopening a saved snap (see
+   *  deps.setCaptureFromLibrary passed to SnapKit.library.init below), and the
+   *  tab switch/close handlers right below this function. `capture` itself must
+   *  already be reassigned by the caller before this runs.
+   *
+   *  A new snap no longer erases the old one the way V1 did: loadCapture() pushes
+   *  it as a new tab instead of overwriting `capture` in place, so whatever was on
+   *  screen stays open — and switchable, so an element or the finished image can
+   *  still be copied across. The paths that DO discard a capture outright
+   *  ("Replace base image…", closing a tab) do NOT save it to the Library first —
+   *  on direct instruction, saving there only ever happens when the user clicks
+   *  "Save to library" themselves (see SnapKit.library.init below); those two
+   *  paths ask for confirmation instead (see fileInput's change handler and
+   *  closeTab()), since there is no other safety net once the capture is gone. */
+  function finishCaptureSwap(note) {
+    baseImg.src = capture.img.dataUrl;
     baseImg.style.width = capture.img.w + 'px'; baseImg.style.height = capture.img.h + 'px';
     // The wrapper is the image box. .stage shrink-wraps around it so that turning
     // the screenshot-canvas on just adds padding, with nothing to recompute.
     shotWrap.style.width = capture.img.w + 'px'; shotWrap.style.height = capture.img.h + 'px';
     dropHint.style.display = 'none';
     selId = null;
-    if (stampToggle.checked) { const s = newElement('stamp'); s.text = SnapKit.contextStamp.stampText(capture); capture.els.push(s); }
+    stampToggle.checked = capture.els.some((e) => e.type === 'stamp');
     render();
     applyZoom(computeFit());
     if (view === 'lab') SnapKit.lab.renderLab();   // the "Your capture" ground and the magnifier lens both read `capture`
-    toast(note || 'Capture loaded.');
+    if (note) toast(note);   // switching/closing tabs stays quiet — only an actual load/replace announces itself
+    renderTabs();
+    saveSessionNow();
+  }
+
+  // ---- capture tabs ---------------------------------------------------------
+  const snapTabs = $('#snapTabs');
+  function tabLabel(cap) {
+    if (cap.url) { try { return new URL(cap.url).host; } catch (e) {} }
+    return 'Untitled capture';
+  }
+  function renderTabs() {
+    if (!snapTabs) return;
+    snapTabs.innerHTML = '';
+    captures.forEach((cap) => {
+      const tab = document.createElement('button');
+      tab.type = 'button';
+      tab.className = 'snap-tab' + (cap === capture ? ' on' : '');
+      tab.title = tabLabel(cap);
+      tab.innerHTML = `<img class="snap-tab-thumb" src="${cap.img.dataUrl}" alt="">`
+        + `<span class="snap-tab-label">${escapeHtml(tabLabel(cap))}</span>`
+        + `<span class="snap-tab-close" title="Close this tab" aria-label="Close this tab">✕</span>`;
+      tab.addEventListener('click', (e) => {
+        if (e.target.closest('.snap-tab-close')) { closeTab(cap); return; }
+        switchTab(cap);
+      });
+      snapTabs.appendChild(tab);
+    });
+  }
+  function switchTab(cap) {
+    if (cap === capture) return;
+    if (placing) placing.cancel();   // leaving the canvas mid-placement would strand its listeners
+    if (cropState) endCrop();        // the pending crop belongs to the tab being left, not the one coming in
+    capture = cap;
+    finishCaptureSwap();
+  }
+  /** Back to the pre-first-snap state — same DOM as editor.html ships with, since
+   *  render()/renderLayers()/renderProps() all assume a `capture` and would throw
+   *  the moment closeTab() below empties `captures` out entirely. */
+  function resetToEmpty() {
+    capture = null; selId = null;
+    baseImg.removeAttribute('src');
+    shotWrap.style.width = ''; shotWrap.style.height = '';
+    canvas.innerHTML = '';
+    layersEl.innerHTML = ''; layerCount.textContent = '';
+    propsTitle.textContent = 'Properties';
+    props.innerHTML = '<p class="empty-hint">Select a component to edit it, or click one in the list on the left to add it.</p>';
+    stampToggle.checked = false;
+    dropHint.style.display = '';
+    zoom = 1; zoomLbl.textContent = 'Fit';   // matches the untouched pre-first-load HTML, not a stale "100%"
+    renderTabs();
+    saveSessionNow();
+  }
+  /** Closing a tab discards that capture outright — on direct instruction this
+   *  does NOT autosave to the Library (see library.js's file header: saving
+   *  there only ever happens from the user's own "Save to library" click).
+   *  Confirms first when there's anything to lose, same trigger/wording
+   *  convention as "Replace base image…" below. Closing the active tab falls
+   *  back to its neighbour; closing the last remaining tab drops the editor
+   *  back to the empty state. */
+  function closeTab(cap) {
+    const idx = captures.indexOf(cap);
+    if (idx < 0) return;
+    if (cap.els.some((el) => el.type !== 'stamp')
+        && !window.confirm('Closing this tab discards its image layers and annotations for good, unless you already saved it to the Library. Continue?')) return;
+    captures.splice(idx, 1);
+    // resetToEmpty()/finishCaptureSwap() below both persist the session themselves;
+    // closing a tab that ISN'T the active one skips both, so it has to save here.
+    if (cap !== capture) { renderTabs(); saveSessionNow(); return; }
+    if (placing) placing.cancel();
+    if (cropState) endCrop();
+    if (!captures.length) { resetToEmpty(); return; }
+    capture = captures[Math.min(idx, captures.length - 1)];
+    finishCaptureSwap();
+  }
+
+  // ---- session persistence (survive a page reload) ---------------------------
+  // `captures` only ever lived in memory before this — a reload reset it to
+  // nothing, and the only thing that reappeared was whatever `pendingCapture`
+  // last replayed from chrome.storage.local (see the extension-pipeline wiring
+  // at the bottom), which is exactly what made a reload look like "every tab
+  // but the newest one vanished". This snapshots the whole tab strip into
+  // IndexedDB (SnapKit.library.saveSession()/loadSession(), src/library.js) so
+  // restoreSession() below can put it all back before that pipeline runs.
+  function serializeCaptures() {
+    return captures.map((c) => ({
+      id: c.id, url: c.url,
+      capturedAt: c.capturedAt instanceof Date ? c.capturedAt.getTime() : Date.now(),
+      img: { dataUrl: c.img.dataUrl, w: c.img.w, h: c.img.h },   // never `.el` — see loadCapture()'s comment on why it isn't serializable/needed
+      els: JSON.parse(JSON.stringify(c.els)),
+    }));
+  }
+  let sessionSaveTimer = null;
+  function saveSessionNow() {
+    clearTimeout(sessionSaveTimer);
+    SnapKit.library.saveSession(serializeCaptures(), capture ? capture.id : null)
+      .catch((e) => console.warn('[snap-studio] session autosave failed:', e));
+  }
+  // render()/syncNode() call this on every edit — including every pointermove of
+  // a drag, or every keystroke in a text field — so a raw write here would hammer
+  // IndexedDB; debounced, it only actually writes once things settle for a beat.
+  // Tab lifecycle (open/switch/close, above) skips this and calls saveSessionNow()
+  // directly instead: those are rare, discrete events worth persisting right away.
+  function scheduleSessionSave() {
+    clearTimeout(sessionSaveTimer);
+    sessionSaveTimer = setTimeout(saveSessionNow, 1200);
+  }
+  async function restoreSession() {
+    let session = null;
+    try { session = await SnapKit.library.loadSession(); }
+    catch (e) { console.warn('[snap-studio] session restore failed:', e); }
+    if (!session || !session.tabs || !session.tabs.length) return;
+    for (const t of session.tabs) {
+      try {
+        const img = await loadImage(t.img.dataUrl);
+        const restored = {
+          id: t.id, url: t.url || '',
+          capturedAt: new Date(t.capturedAt || Date.now()),
+          img: { dataUrl: t.img.dataUrl, w: img.naturalWidth, h: img.naturalHeight, el: img },
+          els: JSON.parse(JSON.stringify(t.els || [])),
+        };
+        captures.push(restored);
+        if (t.id) consumedIds.add(t.id);   // belt-and-suspenders: a stale pendingCapture replaying this same id shouldn't re-add it
+        if (t.id === session.activeId) capture = restored;
+      } catch (e) { console.warn('[snap-studio] could not restore a session tab:', e); }
+    }
+    if (!capture && captures.length) capture = captures[captures.length - 1];
+    if (capture) finishCaptureSwap();
   }
 
   // ---- screenshot-canvas ---------------------------------------------------
@@ -614,7 +878,7 @@
   // background the image lands on later (a KB article, a Slack message, a dark-mode
   // reader). It is still a toggle here, because pasting raw pixels into a ticket
   // thread that already frames attachments is a fair reason to skip it — but it
-  // defaults on, the way the kit says, rather than off the way V1 shipped.
+  // now defaults off, on direct instruction, the way V1 shipped.
   const frameToggle = $('#frameToggle');
   function applyFrame() {
     stage.classList.toggle('cmp-screenshot-canvas', frameToggle.checked);
@@ -631,18 +895,130 @@
     else if (!stampToggle.checked && existing) { removeEl(existing.id); }
   });
 
+  // ---- crop frame -----------------------------------------------------------
+  // Re-frames the BASE IMAGE, not an annotation — closer kin to "Replace base
+  // image…" than to anything in the palette. Draws a resizable frame over the
+  // shot (image-space px, same coordinate system every element's x/y already
+  // lives in — see cropLayer's markup, nested inside #shotWrap so it inherits
+  // the zoom transform for free); Apply crops capture.img to that frame via
+  // the same cropDataUrl() the initial region-select capture uses, then shifts
+  // every element's stored position by the frame's own (x, y) so nothing jumps
+  // relative to the shot it's anchored to. Elements that end up outside the
+  // new frame are left alone rather than deleted or clamped — .stage is
+  // already overflow:visible on purpose (a text-box may hang off the shot),
+  // so a stray annotation past the new edge is the same already-accepted
+  // shape as one that hangs off today, not a new failure mode.
+  function paintCropFrame() {
+    const { x, y, w, h } = cropState;
+    cropFrameEl.style.left = x + 'px'; cropFrameEl.style.top = y + 'px';
+    cropFrameEl.style.width = w + 'px'; cropFrameEl.style.height = h + 'px';
+    cropDimsEl.textContent = `${Math.round(w)} × ${Math.round(h)}`;
+  }
+  function startCrop() {
+    if (!capture) { toast('No capture to crop yet.'); return; }
+    if (cropState) return;
+    if (placing) placing.cancel();
+    const w = Math.round(capture.img.w * 0.8), h = Math.round(capture.img.h * 0.8);
+    cropState = { x: Math.round((capture.img.w - w) / 2), y: Math.round((capture.img.h - h) / 2), w, h };
+    paintCropFrame();
+    cropLayer.hidden = false;
+    snapActions.hidden = true; cropActions.hidden = false;
+    document.addEventListener('keydown', onCropKey, true);
+  }
+  function endCrop() {
+    if (!cropState) return;
+    cropState = null;
+    cropLayer.hidden = true;
+    snapActions.hidden = false; cropActions.hidden = true;
+    document.removeEventListener('keydown', onCropKey, true);
+  }
+  function onCropKey(e) {
+    if (e.key === 'Escape') { e.preventDefault(); endCrop(); }
+    else if (e.key === 'Enter' && !isTyping()) { e.preventDefault(); applyCrop(); }
+  }
+  async function applyCrop() {
+    if (!cropState) return;
+    const x = Math.round(cropState.x), y = Math.round(cropState.y);
+    const w = Math.max(1, Math.round(cropState.w)), h = Math.max(1, Math.round(cropState.h));
+    // The pixels outside the new frame are gone the moment Apply is pressed — on
+    // direct instruction this does NOT autosave the pre-crop shot to the Library
+    // (see library.js's file header); "Save to library" beforehand is on the user.
+    // No confirm() here though, unlike "Replace base image…"/closing a tab: crop
+    // doesn't drop any annotation, it only repositions them, and drawing then
+    // applying the frame is already a deliberate, visible multi-step action.
+    const dataUrl = await cropDataUrl(capture.img.dataUrl, x, y, w, h);
+    const img = await loadImage(dataUrl);
+    capture.els.forEach((el) => {
+      if (el.type === 'arrow') { el.x1 -= x; el.y1 -= y; el.x2 -= x; el.y2 -= y; }
+      else { el.x -= x; el.y -= y; }
+    });
+    capture.img = { dataUrl, w, h, el: img };
+    endCrop();
+    baseImg.src = dataUrl;
+    baseImg.style.width = w + 'px'; baseImg.style.height = h + 'px';
+    shotWrap.style.width = w + 'px'; shotWrap.style.height = h + 'px';
+    render();
+    applyZoom(computeFit());
+    toast(`Cropped to ${w}×${h}.`);
+  }
+  cropBtn.addEventListener('click', startCrop);
+  cropCancelBtn.addEventListener('click', endCrop);
+  cropApplyBtn.addEventListener('click', applyCrop);
+  cropLayer.addEventListener('pointerdown', (e) => {
+    if (!cropState) return;
+    const handle = e.target.closest('.crop-handle');
+    e.preventDefault(); e.stopPropagation();
+    const startX = e.clientX, startY = e.clientY;
+    const orig = { ...cropState };
+    const maxW = capture.img.w, maxH = capture.img.h;
+    let move;
+    if (handle) {
+      // Each corner only ever moves the two edges its own name mentions — the
+      // OTHER two edges are the fixed pivot, read once up front so the frame
+      // resizes from that corner instead of re-centering on every move.
+      const corner = handle.dataset.h;
+      const x2 = orig.x + orig.w, y2 = orig.y + orig.h;
+      move = (ev) => {
+        const dx = (ev.clientX - startX) / zoom, dy = (ev.clientY - startY) / zoom;
+        let left = orig.x, top = orig.y, right = x2, bottom = y2;
+        if (corner.includes('w')) left = Math.max(0, Math.min(x2 - 24, orig.x + dx));
+        if (corner.includes('e')) right = Math.min(maxW, Math.max(orig.x + 24, x2 + dx));
+        if (corner.includes('n')) top = Math.max(0, Math.min(y2 - 24, orig.y + dy));
+        if (corner.includes('s')) bottom = Math.min(maxH, Math.max(orig.y + 24, y2 + dy));
+        cropState = { x: left, y: top, w: right - left, h: bottom - top };
+        paintCropFrame();
+      };
+    } else {
+      move = (ev) => {
+        const dx = (ev.clientX - startX) / zoom, dy = (ev.clientY - startY) / zoom;
+        cropState = {
+          x: Math.max(0, Math.min(maxW - orig.w, orig.x + dx)),
+          y: Math.max(0, Math.min(maxH - orig.h, orig.y + dy)),
+          w: orig.w, h: orig.h,
+        };
+        paintCropFrame();
+      };
+    }
+    const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); };
+    window.addEventListener('pointermove', move); window.addEventListener('pointerup', up);
+  });
+
   $('#uploadBtn').addEventListener('click', () => fileInput.click());
   fileInput.addEventListener('change', () => {
     const f = fileInput.files[0];
     fileInput.value = '';                          // the File is already held; clear so the same path re-fires
     if (!f) return;
-    // Unlike a paste, this REPLACES the capture and drops every layer with it, and it
-    // is now reachable from the base layer's panel rather than only from the empty
-    // state — so it has to ask once there is anything to lose.
+    // Unlike a paste — or a new snap, which opens its own tab in the strip above the
+    // stage — "Replace base image…" REPLACES the capture in place and drops every
+    // layer with it, on purpose (loadCapture's replaceInPlace: true). It is reachable
+    // from the base layer's panel rather than only from the empty state, so it has to
+    // ask once there is anything to lose. On direct instruction this does NOT autosave
+    // the outgoing capture to the Library (see library.js's file header) — "Save to
+    // library" beforehand is on the user, so the warning below has to mean it.
     if (capture && capture.els.some((el) => el.type !== 'stamp')
-        && !window.confirm('Replacing the base image clears every image layer and annotation. Continue?')) return;
+        && !window.confirm('Replacing the base image discards every image layer and annotation on it for good, unless you already saved it to the Library. Continue?')) return;
     const reader = new FileReader();
-    reader.onload = () => loadCapture({ id: uid('up_'), dataUrl: reader.result, url: '', rect: null });
+    reader.onload = () => loadCapture({ id: uid('up_'), dataUrl: reader.result, url: '', rect: null, replaceInPlace: true });
     reader.readAsDataURL(f);
   });
 
@@ -650,12 +1026,15 @@
   let view = 'snap';
   function setView(v) {
     if (placing) placing.cancel();          // leaving the canvas mid-placement would strand its listeners
-    view = (v === 'lab' || v === 'kb') ? v : 'snap';
+    if (cropState) endCrop();               // the crop frame only makes sense over the Snap tab's own canvas
+    view = (v === 'lab' || v === 'library' || v === 'kb') ? v : 'snap';
     document.body.classList.toggle('view-lab', view === 'lab');
     document.body.classList.toggle('view-snap', view === 'snap');
+    document.body.classList.toggle('view-library', view === 'library');
     document.body.classList.toggle('view-kb', view === 'kb');
     document.querySelectorAll('.vtab').forEach((b) => b.classList.toggle('on', b.dataset.view === view));
     if (view === 'lab') SnapKit.lab.renderLab();
+    else if (view === 'library') SnapKit.library.renderLibrary();
     else if (view === 'snap' && capture) applyZoom(computeFit());
   }
   document.querySelectorAll('.vtab').forEach((b) => b.addEventListener('click', () => setView(b.dataset.view)));
@@ -676,6 +1055,20 @@
     cropDataUrl, loadImage, loadCapture,
     select, setView,
   });
+  SnapKit.library.init({
+    getCapture: () => capture,
+    getView: () => view, setView,
+    toast,
+    // The library builds the restored `capture` object itself (image already
+    // decoded, els already round-tripped); reopening it is a new tab too, same
+    // as any other incoming capture — whatever was already open stays open.
+    setCaptureFromLibrary: (next) => {
+      captures.push(next);
+      capture = next;
+      setView('snap');
+      finishCaptureSwap('Loaded from the library.');
+    },
+  });
   SnapKit.bridge.init({
     getCapture: () => capture,
     loadCapture, loadImage, newElement,
@@ -684,16 +1077,27 @@
   SnapKit.kb.init({ toast });
 
   // ---- wiring to the extension's capture pipeline --------------------------
-  if (hasExt) {
+  // Session restore first, unconditionally (IndexedDB works the same whether or
+  // not this is running as the extension — see library.js) — THEN the pending
+  // snap, so a fresh capture from the toolbar/hotkey lands as one more tab on
+  // top of whatever the session just put back, not instead of it.
+  restoreSession().then(() => {
+    if (!hasExt) return;
     const PENDING_KEYS = ['pendingCapture', 'captureId', 'captureUrl', 'captureRect'];
     chrome.storage.local.get(PENDING_KEYS).then(async (r) => {
       if (!r || !r.pendingCapture) return;
       await loadCapture({ id: r.captureId, dataUrl: r.pendingCapture, url: r.captureUrl, rect: r.captureRect });
       // A screenshot can carry customer data, and chrome.storage.local has no TTL of
       // its own — background.js writes it but never clears it (see KB-BRIDGE.md 5.1),
-      // so it is cleared here, the moment the editor actually has the image.
+      // so it is cleared here, the moment the editor actually has the image. Also
+      // consumed here for the OTHER half of "reload loses every tab but the newest":
+      // session restore now brings every tab back, but a leftover pendingCapture
+      // would still replay as one more, stale, phantom tab on top of them, every
+      // single time the page (re)loads.
       chrome.storage.local.remove(PENDING_KEYS).catch(() => {});
     }).catch(() => {});
+  });
+  if (hasExt) {
     chrome.runtime.onMessage.addListener((msg) => {
       if (msg && msg.type === 'snap-capture') loadCapture({ id: msg.id, dataUrl: msg.dataUrl, url: msg.url, rect: msg.rect });
     });
