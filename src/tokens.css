@@ -905,7 +905,7 @@ body.render .el[data-type="spotlight"].selected .cmp-spotlight-cutout { outline:
    always applied or cancelled before an export runs, never mid-flight when
    the screenshot fires. */
 #cropLayer { position: absolute; inset: 0; overflow: hidden; z-index: 20; cursor: move; }
-.crop-frame { position: absolute; box-sizing: border-box; border: 2px solid var(--color-primary-500);
+.crop-frame { position: absolute; box-sizing: border-box; border: 2px dashed var(--color-primary-500);
   box-shadow: 0 0 0 9999px rgba(var(--color-neutral-900-rgb), .55); }
 .crop-dims { position: absolute; left: 0; top: 0; transform: translate(0, calc(-100% - var(--space-2)));
   background: var(--color-primary-500); color: var(--color-neutral-0);

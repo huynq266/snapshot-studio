@@ -1,6 +1,11 @@
 /* =====================================================================
-   SNAP LIBRARY — the "Library" tab. V2 roadmap item: "snapping a new
-   capture used to destroy the old one — export/copy first or lose it."
+   SNAP LIBRARY — the "Library" tab. A deliberate, user-triggered save of
+   the current capture: click "Save to library" and nothing else — on
+   direct instruction this does NOT run automatically on a new snap,
+   closing a tab, replacing the base image, or cropping. The only writer
+   in this whole file is that one button's click handler in init() below.
+   A capture discarded without the user saving it first is genuinely gone;
+   there is no silent backstop.
 
    Decisions this file bakes in (see ROADMAP.md "V2" / "Quyet dinh con
    treo" #2):
@@ -19,15 +24,17 @@
    (long edge capped, JPEG) is what the grid actually paints, so opening
    the Library tab does not have to decode every full-resolution PNG at once.
 
-   Dedup: re-opening a saved snap and closing it again without touching
-   it would otherwise re-save an identical duplicate the moment something
-   else replaces it. A WeakMap remembers the `els` JSON a given `capture`
-   object was last saved/loaded as; autosave skips the write when nothing
-   changed. Keyed on the object, not stashed as a field on `capture`,
-   so this bookkeeping never leaks into what editor.js/export.js see.
-
    Wired up once editor.js has built its own state/DOM refs — see init()
-   below and the call to it at the bottom of editor.js. */
+   below and the call to it at the bottom of editor.js.
+
+   This file also owns a second, unrelated IndexedDB store: the "open-tab
+   session" (saveSession()/loadSession() near the bottom) that lets a page
+   reload restore editor.js's whole tab strip instead of losing every tab but
+   whatever `pendingCapture` last replayed. That one DOES still run
+   automatically (debounced, on every edit) — it's current-session state,
+   not a library entry, so the "manual save only" rule above doesn't cover
+   it; see that section's own comment for why it needed its own store
+   instead of piggybacking on `snaps`. */
 (() => {
   window.SnapKit = window.SnapKit || {};
   const $ = (s) => document.querySelector(s);
@@ -35,7 +42,10 @@
   const escapeHtml = (s) => (s || '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
   // ---- IndexedDB -----------------------------------------------------
-  const DB_NAME = 'snapstudio-library', DB_VERSION = 1, STORE = 'snaps';
+  // v2 adds SESSION_STORE (see "open-tab session" below) alongside the original
+  // `snaps` store — onupgradeneeded only ever ADDS a store it doesn't find yet,
+  // so a v1 database (an existing user's saved snaps) upgrades in place.
+  const DB_NAME = 'snapstudio-library', DB_VERSION = 2, STORE = 'snaps', SESSION_STORE = 'session';
   let dbPromise = null;
   function openDb() {
     if (dbPromise) return dbPromise;
@@ -45,6 +55,7 @@
       req.onupgradeneeded = () => {
         const db = req.result;
         if (!db.objectStoreNames.contains(STORE)) db.createObjectStore(STORE, { keyPath: 'id' }).createIndex('by_savedAt', 'savedAt');
+        if (!db.objectStoreNames.contains(SESSION_STORE)) db.createObjectStore(SESSION_STORE, { keyPath: 'id' });
       };
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => reject(req.error);
@@ -107,6 +118,36 @@
     else { try { localStorage.setItem(SETTINGS_LS_KEY, JSON.stringify(settings)); } catch (e) {} }
   }
 
+  // ---- open-tab session --------------------------------------------------
+  // A reload used to lose every open tab but the newest — `captures` in
+  // editor.js only ever lived in memory, and the leftover `pendingCapture` in
+  // chrome.storage.local (see editor.js's extension-pipeline wiring) replayed
+  // as one fresh tab on every load, which is exactly what made it LOOK like
+  // "the newest tab survives". This is the actual fix: editor.js snapshots its
+  // whole tab strip here (debounced while editing, immediately on open/switch/
+  // close — see scheduleSessionSave()/saveSessionNow() there) and restores it
+  // before the extension pipeline gets a chance to add anything on top.
+  // One record, always the same id: this is current-session state, not
+  // history — no list, no retention policy, overwritten wholesale every time.
+  const SESSION_ID = 'current';
+  async function saveSession(tabs, activeId) {
+    const db = await openDb();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(SESSION_STORE, 'readwrite');
+      tx.objectStore(SESSION_STORE).put({ id: SESSION_ID, tabs, activeId, savedAt: Date.now() });
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  }
+  async function loadSession() {
+    const db = await openDb();
+    return new Promise((resolve, reject) => {
+      const req = db.transaction(SESSION_STORE, 'readonly').objectStore(SESSION_STORE).get(SESSION_ID);
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror = () => reject(req.error);
+    });
+  }
+
   // ---- thumbnails ------------------------------------------------------
   function loadImageLocal(src) {
     return new Promise((resolve, reject) => { const img = new Image(); img.onload = () => resolve(img); img.onerror = reject; img.src = src; });
@@ -120,20 +161,13 @@
     return c.toDataURL('image/jpeg', 0.72);
   }
 
-  // ---- save / dedup ------------------------------------------------------
-  // Keyed on the live `capture` object, not a field on it — see file header.
-  const savedSnapshotOf = new WeakMap();
-  const snapshotJSON = (capture) => JSON.stringify(capture.els);
-  function markClean(capture) { savedSnapshotOf.set(capture, snapshotJSON(capture)); }
-
-  /** Writes one record. Returns false (no write) when `capture`'s annotations
-   *  are byte-identical to whatever it was last saved/opened as, unless
-   *  `force` — the explicit "Save to library" button always writes, since a
-   *  silent no-op there would just look broken. */
-  async function saveSnapshot(capture, { force = false } = {}) {
+  // ---- save (manual only — see file header) ------------------------------
+  /** Writes one record. Always creates a new one — no dedup, on purpose:
+   *  "Save to library" is the ONLY thing that ever calls this now, so every
+   *  click should visibly do something, never silently no-op because
+   *  nothing changed since the last save. */
+  async function saveSnapshot(capture) {
     if (!capture) return false;
-    const json = snapshotJSON(capture);
-    if (!force && savedSnapshotOf.get(capture) === json) return false;
     const thumbDataUrl = await makeThumb(capture.img.dataUrl);
     const record = {
       id: 'lib_' + Date.now() + '-' + Math.random().toString(36).slice(2, 7),
@@ -142,25 +176,11 @@
       url: capture.url || '',
       w: capture.img.w, h: capture.img.h,
       imgDataUrl: capture.img.dataUrl,
-      els: JSON.parse(json),
+      els: JSON.parse(JSON.stringify(capture.els)),
       thumbDataUrl,
     };
     await dbPut(record);
-    markClean(capture);
     return true;
-  }
-
-  /** The fix for "a new snap silently erases the old one": editor.js calls
-   *  this with whatever capture is about to be replaced, right before it
-   *  swaps in the new one. Fire-and-forget from the caller's point of view —
-   *  a failure here must never block loading the new capture, only surface
-   *  loudly so nothing vanishes quietly (same "degrade loudly" principle the
-   *  predecessor toolkit used for its own optional integrations). */
-  async function autoSaveOutgoing(capture) {
-    if (!capture) return;
-    try { await saveSnapshot(capture); }
-    catch (e) { console.warn('[snap-studio] library autosave failed:', e); if (toastFn) toastFn('Could not save the previous capture to the library: ' + (e && e.message || e), 5000); }
-    if (getViewFn && getViewFn() === 'library') renderGrid();
   }
 
   // ---- retention enforcement ---------------------------------------------
@@ -180,7 +200,6 @@
   }
 
   // ---- UI (job-board grid, one card per saved snap) -----------------------
-  let toastFn = null, getViewFn = null;
   const grid = $('#libraryGrid'), emptyEl = $('#libraryEmpty'), retentionSel = $('#libRetention');
   const usageNote = $('#libStorageNote'), countNote = $('#libCountNote'), clearBtn = $('#libClearAll'), saveBtn = $('#libSaveCurrent');
 
@@ -244,20 +263,17 @@
       // `capture.els` in place, and that must never reach back into the record.
       els: JSON.parse(JSON.stringify(record.els || [])),
     };
-    markClean(next);   // opening it unmodified must not re-save a duplicate
     deps.setCaptureFromLibrary(next);
   }
 
   function init(passedDeps) {
     deps = passedDeps;
-    toastFn = deps.toast;
-    getViewFn = deps.getView;
 
     saveBtn.addEventListener('click', async () => {
       const capture = deps.getCapture();
       if (!capture) { deps.toast('Nothing to save yet — snap or upload an image first.'); return; }
-      const saved = await saveSnapshot(capture, { force: true });
-      deps.toast(saved ? 'Saved the current capture to the library.' : 'Already saved — nothing has changed since.');
+      await saveSnapshot(capture);
+      deps.toast('Saved the current capture to the library.');
       renderGrid();
     });
 
@@ -277,5 +293,5 @@
     getSettings().then(({ retentionDays }) => { retentionSel.value = String(retentionDays); });
   }
 
-  window.SnapKit.library = { init, autoSaveOutgoing, renderLibrary: renderGrid };
+  window.SnapKit.library = { init, renderLibrary: renderGrid, saveSession, loadSession };
 })();

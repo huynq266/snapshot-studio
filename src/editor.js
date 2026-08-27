@@ -224,6 +224,7 @@
     });
     shotWrap.classList.toggle('base-selected', selId === BASE_ID);
     renderLayers(); renderProps();
+    scheduleSessionSave();
   }
   function renderLayers() {
     layerCount.textContent = capture.els.length + 1;    // + the shot itself
@@ -354,6 +355,7 @@
     if (el.type === 'zoom') handles.forEach((h) => { if (h.classList.contains('radius')) positionRadiusHandle(h, el); });
     const host = handleHost(node, el);
     handles.forEach((h) => host.appendChild(h));
+    scheduleSessionSave();
   }
 
   /** Reorder inside the image stack only. Images are kept at the FRONT of `els` — the
@@ -706,8 +708,7 @@
     if (stampToggle.checked) { const s = newElement('stamp'); s.text = SnapKit.contextStamp.stampText(capture); next.els.push(s); }
     if (replaceInPlace && prev) {
       const idx = captures.indexOf(prev);
-      captures[idx >= 0 ? idx : captures.length] = next;
-      SnapKit.library.autoSaveOutgoing(prev);   // being discarded outright — the Library is its only way out
+      captures[idx >= 0 ? idx : captures.length] = next;   // `prev` is discarded outright here — see fileInput's own confirm() for the warning
     } else {
       captures.push(next);
     }
@@ -723,10 +724,12 @@
    *  A new snap no longer erases the old one the way V1 did: loadCapture() pushes
    *  it as a new tab instead of overwriting `capture` in place, so whatever was on
    *  screen stays open — and switchable, so an element or the finished image can
-   *  still be copied across — rather than only surviving in the Library. The two
-   *  paths that DO discard a capture outright ("Replace base image…" and closing a
-   *  tab) call SnapKit.library.autoSaveOutgoing() themselves before doing so, so
-   *  that backstop still holds for those. */
+   *  still be copied across. The paths that DO discard a capture outright
+   *  ("Replace base image…", closing a tab) do NOT save it to the Library first —
+   *  on direct instruction, saving there only ever happens when the user clicks
+   *  "Save to library" themselves (see SnapKit.library.init below); those two
+   *  paths ask for confirmation instead (see fileInput's change handler and
+   *  closeTab()), since there is no other safety net once the capture is gone. */
   function finishCaptureSwap(note) {
     baseImg.src = capture.img.dataUrl;
     baseImg.style.width = capture.img.w + 'px'; baseImg.style.height = capture.img.h + 'px';
@@ -741,6 +744,7 @@
     if (view === 'lab') SnapKit.lab.renderLab();   // the "Your capture" ground and the magnifier lens both read `capture`
     if (note) toast(note);   // switching/closing tabs stays quiet — only an actual load/replace announces itself
     renderTabs();
+    saveSessionNow();
   }
 
   // ---- capture tabs ---------------------------------------------------------
@@ -789,23 +793,83 @@
     dropHint.style.display = '';
     zoom = 1; zoomLbl.textContent = 'Fit';   // matches the untouched pre-first-load HTML, not a stale "100%"
     renderTabs();
+    saveSessionNow();
   }
-  /** Closing a tab discards that capture outright, so — same principle as
-   *  "Replace base image…" — it goes to the Library first rather than just
-   *  vanishing. Closing the active tab falls back to its neighbour; closing the
-   *  last remaining tab drops the editor back to the empty state. */
+  /** Closing a tab discards that capture outright — on direct instruction this
+   *  does NOT autosave to the Library (see library.js's file header: saving
+   *  there only ever happens from the user's own "Save to library" click).
+   *  Confirms first when there's anything to lose, same trigger/wording
+   *  convention as "Replace base image…" below. Closing the active tab falls
+   *  back to its neighbour; closing the last remaining tab drops the editor
+   *  back to the empty state. */
   function closeTab(cap) {
     const idx = captures.indexOf(cap);
     if (idx < 0) return;
-    SnapKit.library.autoSaveOutgoing(cap);
+    if (cap.els.some((el) => el.type !== 'stamp')
+        && !window.confirm('Closing this tab discards its image layers and annotations for good, unless you already saved it to the Library. Continue?')) return;
     captures.splice(idx, 1);
-    toast('Tab closed — saved to the Library first.');
-    if (cap !== capture) { renderTabs(); return; }
+    // resetToEmpty()/finishCaptureSwap() below both persist the session themselves;
+    // closing a tab that ISN'T the active one skips both, so it has to save here.
+    if (cap !== capture) { renderTabs(); saveSessionNow(); return; }
     if (placing) placing.cancel();
     if (cropState) endCrop();
     if (!captures.length) { resetToEmpty(); return; }
     capture = captures[Math.min(idx, captures.length - 1)];
     finishCaptureSwap();
+  }
+
+  // ---- session persistence (survive a page reload) ---------------------------
+  // `captures` only ever lived in memory before this — a reload reset it to
+  // nothing, and the only thing that reappeared was whatever `pendingCapture`
+  // last replayed from chrome.storage.local (see the extension-pipeline wiring
+  // at the bottom), which is exactly what made a reload look like "every tab
+  // but the newest one vanished". This snapshots the whole tab strip into
+  // IndexedDB (SnapKit.library.saveSession()/loadSession(), src/library.js) so
+  // restoreSession() below can put it all back before that pipeline runs.
+  function serializeCaptures() {
+    return captures.map((c) => ({
+      id: c.id, url: c.url,
+      capturedAt: c.capturedAt instanceof Date ? c.capturedAt.getTime() : Date.now(),
+      img: { dataUrl: c.img.dataUrl, w: c.img.w, h: c.img.h },   // never `.el` — see loadCapture()'s comment on why it isn't serializable/needed
+      els: JSON.parse(JSON.stringify(c.els)),
+    }));
+  }
+  let sessionSaveTimer = null;
+  function saveSessionNow() {
+    clearTimeout(sessionSaveTimer);
+    SnapKit.library.saveSession(serializeCaptures(), capture ? capture.id : null)
+      .catch((e) => console.warn('[snap-studio] session autosave failed:', e));
+  }
+  // render()/syncNode() call this on every edit — including every pointermove of
+  // a drag, or every keystroke in a text field — so a raw write here would hammer
+  // IndexedDB; debounced, it only actually writes once things settle for a beat.
+  // Tab lifecycle (open/switch/close, above) skips this and calls saveSessionNow()
+  // directly instead: those are rare, discrete events worth persisting right away.
+  function scheduleSessionSave() {
+    clearTimeout(sessionSaveTimer);
+    sessionSaveTimer = setTimeout(saveSessionNow, 1200);
+  }
+  async function restoreSession() {
+    let session = null;
+    try { session = await SnapKit.library.loadSession(); }
+    catch (e) { console.warn('[snap-studio] session restore failed:', e); }
+    if (!session || !session.tabs || !session.tabs.length) return;
+    for (const t of session.tabs) {
+      try {
+        const img = await loadImage(t.img.dataUrl);
+        const restored = {
+          id: t.id, url: t.url || '',
+          capturedAt: new Date(t.capturedAt || Date.now()),
+          img: { dataUrl: t.img.dataUrl, w: img.naturalWidth, h: img.naturalHeight, el: img },
+          els: JSON.parse(JSON.stringify(t.els || [])),
+        };
+        captures.push(restored);
+        if (t.id) consumedIds.add(t.id);   // belt-and-suspenders: a stale pendingCapture replaying this same id shouldn't re-add it
+        if (t.id === session.activeId) capture = restored;
+      } catch (e) { console.warn('[snap-studio] could not restore a session tab:', e); }
+    }
+    if (!capture && captures.length) capture = captures[captures.length - 1];
+    if (capture) finishCaptureSwap();
   }
 
   // ---- screenshot-canvas ---------------------------------------------------
@@ -876,10 +940,12 @@
     if (!cropState) return;
     const x = Math.round(cropState.x), y = Math.round(cropState.y);
     const w = Math.max(1, Math.round(cropState.w)), h = Math.max(1, Math.round(cropState.h));
-    // Fire-and-forget, same as the other two paths that discard pixels outright
-    // (Replace base image…, closing a tab): the pre-crop shot is one click away
-    // in the Library rather than gone the moment Apply is pressed.
-    SnapKit.library.autoSaveOutgoing(capture);
+    // The pixels outside the new frame are gone the moment Apply is pressed — on
+    // direct instruction this does NOT autosave the pre-crop shot to the Library
+    // (see library.js's file header); "Save to library" beforehand is on the user.
+    // No confirm() here though, unlike "Replace base image…"/closing a tab: crop
+    // doesn't drop any annotation, it only repositions them, and drawing then
+    // applying the frame is already a deliberate, visible multi-step action.
     const dataUrl = await cropDataUrl(capture.img.dataUrl, x, y, w, h);
     const img = await loadImage(dataUrl);
     capture.els.forEach((el) => {
@@ -893,7 +959,7 @@
     shotWrap.style.width = w + 'px'; shotWrap.style.height = h + 'px';
     render();
     applyZoom(computeFit());
-    toast(`Cropped to ${w}×${h} — the previous version was saved to the Library.`);
+    toast(`Cropped to ${w}×${h}.`);
   }
   cropBtn.addEventListener('click', startCrop);
   cropCancelBtn.addEventListener('click', endCrop);
@@ -946,12 +1012,11 @@
     // stage — "Replace base image…" REPLACES the capture in place and drops every
     // layer with it, on purpose (loadCapture's replaceInPlace: true). It is reachable
     // from the base layer's panel rather than only from the empty state, so it has to
-    // ask once there is anything to lose. It still asks even though loadCapture()
-    // will autosave the outgoing capture to the Library: this confirm is about what
-    // happens to the SCREEN right now, and "it's recoverable from the Library" isn't
-    // the same thing as "nothing happens".
+    // ask once there is anything to lose. On direct instruction this does NOT autosave
+    // the outgoing capture to the Library (see library.js's file header) — "Save to
+    // library" beforehand is on the user, so the warning below has to mean it.
     if (capture && capture.els.some((el) => el.type !== 'stamp')
-        && !window.confirm('Replacing the base image clears every image layer and annotation from view. The current shot is kept in the Library tab first — continue?')) return;
+        && !window.confirm('Replacing the base image discards every image layer and annotation on it for good, unless you already saved it to the Library. Continue?')) return;
     const reader = new FileReader();
     reader.onload = () => loadCapture({ id: uid('up_'), dataUrl: reader.result, url: '', rect: null, replaceInPlace: true });
     reader.readAsDataURL(f);
@@ -1005,10 +1070,23 @@
   });
 
   // ---- wiring to the extension's capture pipeline --------------------------
-  if (hasExt) {
+  // Session restore first, unconditionally (IndexedDB works the same whether or
+  // not this is running as the extension — see library.js) — THEN the pending
+  // snap, so a fresh capture from the toolbar/hotkey lands as one more tab on
+  // top of whatever the session just put back, not instead of it.
+  restoreSession().then(() => {
+    if (!hasExt) return;
     chrome.storage.local.get(['pendingCapture', 'captureId', 'captureUrl', 'captureRect']).then((r) => {
-      if (r && r.pendingCapture) loadCapture({ id: r.captureId, dataUrl: r.pendingCapture, url: r.captureUrl, rect: r.captureRect });
+      if (!r || !r.pendingCapture) return;
+      loadCapture({ id: r.captureId, dataUrl: r.pendingCapture, url: r.captureUrl, rect: r.captureRect });
+      // Consumed — leaving it in storage was the OTHER half of "reload loses
+      // every tab but the newest": session restore now brings every tab back,
+      // but a leftover pendingCapture would still replay as one more, stale,
+      // phantom tab on top of them, every single time the page (re)loads.
+      chrome.storage.local.remove(['pendingCapture', 'captureId', 'captureUrl', 'captureRect']).catch(() => {});
     }).catch(() => {});
+  });
+  if (hasExt) {
     chrome.runtime.onMessage.addListener((msg) => {
       if (msg && msg.type === 'snap-capture') loadCapture({ id: msg.id, dataUrl: msg.dataUrl, url: msg.url, rect: msg.rect });
     });

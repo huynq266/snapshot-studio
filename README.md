@@ -38,14 +38,15 @@ deliberate cut, not an oversight — see "What this is NOT" below.
    highlight you already placed.
 7. The tab strip above the canvas holds every capture you've snapped, uploaded, or reopened
    from the Library this session — click one to switch to it (to copy an image or a layer
-   across), or **✕** on it to close it. Closing a tab is the one thing that actually discards
-   a capture, and even that goes through the **Library** tab first rather than vanishing:
-   closing a tab, or **Replace base image…** in the base layer's panel (the deliberate
-   start-over that swaps a tab's image in place, dropping every layer with it), both save
-   whatever was on screen before it goes. Click a card in the Library to reopen it as a new
-   tab with every annotation intact, or **⤓ Save to library** in the toolbar to checkpoint
-   the current one without closing it. Saved snaps auto-expire (14 days by default — change
-   it, or turn it off, in the tab's Retention setting) and never leave this browser profile.
+   across), or **✕** on it to close it. Closing a tab, **Replace base image…** in the base
+   layer's panel, and applying a crop all discard a capture (or its pre-crop pixels) for
+   good — on direct instruction none of them save to the Library for you; each one confirms
+   first (crop doesn't, since it never drops an annotation) rather than pretending there's a
+   safety net. **⤓ Save to library** in the toolbar is the only thing that ever writes there —
+   click it before you close/replace/crop if you want the capture to survive that. Click a
+   card in the Library to reopen it as a new tab with every annotation intact. Saved snaps
+   auto-expire (14 days by default — change it, or turn it off, in the tab's Retention
+   setting) and never leave this browser profile.
 8. The **Components** tab (topbar) is the kit itself: every component on a light ground, a
    dark ground, or your live capture — and **+ New component** to author a new one.
    Anything you make there shows up in the Snap rail under **Yours**.
@@ -72,13 +73,13 @@ honestly than to fight that.
 
 ## What this is NOT (yet)
 
-- **No server, no cross-device history.** The **Library** tab (V2's "Snap Library") is the
-  backstop for the two places a capture is actually discarded rather than just switched away
-  from — closing a tab in the strip, and **Replace base image…** — both funnel through
-  `SnapKit.library.autoSaveOutgoing()` in `editor.js` before the capture goes. It's
-  `chrome.storage`'s cousin, not a server: history lives in this one browser profile only,
-  auto-expires (14/7/30 days, or never, set in the Library tab), and there is no share link
-  and no sync between machines. See `src/library.js` and `ROADMAP.md`'s V2 section.
+- **No server, no cross-device history, no automatic saving.** The **Library** tab (V2's
+  "Snap Library") only ever gets written to by the user clicking **⤓ Save to library** — on
+  direct instruction, closing a tab, **Replace base image…**, and cropping do NOT save there
+  for you; the first two confirm before discarding instead. It's `chrome.storage`'s cousin,
+  not a server: history lives in this one browser profile only, auto-expires (14/7/30 days,
+  or never, set in the Library tab), and there is no share link and no sync between machines.
+  See `src/library.js` and `ROADMAP.md`'s V2 section.
 - **No connector wiring.** The kit's `__connector` parts — text-box's and
   zoom-magnify's optional relocate-with-a-line-back mode, and the arrow's own
   anchor-dot convention they both cite — exist in `tokens.css` but nothing in

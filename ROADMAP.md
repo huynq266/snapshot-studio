@@ -94,12 +94,16 @@ Việc nhỏ, nhưng **chặn việc dùng thật**. Nên làm trước tất c�
       snap toàn tab → snap vùng → thêm cả 7 component → kéo/resize → export → copy.
       *Đây là việc số 1. Mọi mục dưới đây đều giả định V1 thực sự chạy.*
 
-- [ ] **Xoá `pendingCapture` sau khi editor đã nhận ảnh.**
-      `src/background.js:84,119` ghi ảnh vào `chrome.storage.local` nhưng **không nơi nào
-      xoá**. Ảnh chụp màn hình khách hàng nằm lại trong storage vô thời hạn, sống qua cả
-      lần khởi động lại trình duyệt. Đây chính là rủi ro "Dữ liệu khách hàng" mà mục 09
-      của đề xuất nêu — và nó đã hiện diện ngay ở V1, không đợi tới Snap Library.
-      → Gọi `chrome.storage.local.remove([...])` trong `loadCapture()` sau khi ảnh đã vào editor.
+- [x] **Xoá `pendingCapture` sau khi editor đã nhận ảnh.** (2026-08-27)
+      `src/background.js:84,119` ghi ảnh vào `chrome.storage.local` nhưng không nơi nào
+      xoá — sống qua cả lần khởi động lại trình duyệt, và **cũng chính là nguyên nhân**
+      của bug "reload mất hết tab, chỉ còn tab mới nhất": mỗi lần load lại trang, khối
+      này replay y nguyên ảnh cuối cùng thành MỘT tab "ma", đè lên bất cứ gì phiên làm
+      việc có khôi phục được. `editor.js`'s bottom wiring giờ gọi
+      `chrome.storage.local.remove([...])` ngay sau khi tiêu thụ `pendingCapture` một lần.
+      Đi kèm bên dưới: `restoreSession()` — khôi phục cả dải tab từ IndexedDB
+      (`SnapKit.library.saveSession()`/`loadSession()`, store `session` mới trong
+      `src/library.js`) trước khi khối `pendingCapture` này chạy.
 
 - [ ] **Thêm icon cho extension.** `manifest.json` không khai báo `icons` lẫn
       `action.default_icon` → hiện icon mảnh ghép xám mặc định. Repo tiền thân có sẵn bộ
@@ -122,18 +126,22 @@ Mục tiêu: *ảnh chụp có chỗ sống và có đường ra.*
       (cạnh Snap/Components), `src/library.js`. Chỗ lưu đã quyết: **IndexedDB trong
       extension, không server** (theo hướng chỉ-trong-máy của "Quyết định còn treo" #2 —
       chưa có backend nào trong repo này, và job-board/share-link vẫn cần một cái nếu làm
-      tiếp). Có dedup (so JSON của `els`, qua một `WeakMap` chứ không gắn field vào
-      `capture`) để mở một mục ra rồi đóng lại không tự nhân bản. Nút **Save to library**
-      trong toolbar là checkpoint thủ công, luôn ghi (không dedup) vì bấm nút mà không thấy
-      gì xảy ra thì đọc như hỏng.
-      **2026-08-26 — đổi cơ chế nguồn:** cơ chế đè mất của V1 giờ sửa tận gốc theo cách
-      khác, không còn dựa vào Library làm nơi giữ duy nhất. `editor.js` giờ có một dải tab
-      chụp (`#snapTabs`/`renderTabs()`) phía trên canvas — snap mới, và mở lại một mục từ
+      tiếp). Nút **Save to library** trong toolbar là đường ghi DUY NHẤT vào Library.
+      **2026-08-26 — đổi cơ chế nguồn:** cơ chế đè mất của V1 sửa tận gốc theo cách khác,
+      không còn dựa vào Library làm nơi giữ duy nhất. `editor.js` có một dải tab chụp
+      (`#snapTabs`/`renderTabs()`) phía trên canvas — snap mới, và mở lại một mục từ
       Library, đều mở như MỘT TAB MỚI (`captures` array), giữ nguyên tab đang có để chuyển
       qua lại và copy chéo, thay vì gọi `finishCaptureSwap()` để ghi đè `capture` như trước.
-      Library giờ chỉ còn là lưới cho hai đường THỰC SỰ vứt bỏ một capture: đóng một tab
-      (nút ✕ trên tab, `closeTab()`) và **Replace base image…** (`replaceInPlace: true` —
-      vẫn đổi ảnh ngay tại chỗ, có xác nhận, xem README mục "Try it" bước 7).
+      **2026-08-27 — bỏ auto-save, chỉ lưu khi bấm nút (trực tiếp theo yêu cầu):** trước đó
+      ba đường vứt capture thật sự (đóng tab, **Replace base image…**, và crop) đều tự gọi
+      `SnapKit.library.autoSaveOutgoing()` trước khi mất — cùng với dedup qua `WeakMap` để
+      mở lại một mục không tự nhân bản. Cả hai phần đó đã bị bỏ: `autoSaveOutgoing()`,
+      `markClean()`, `savedSnapshotOf` không còn trong `library.js`; `saveSnapshot()` giờ
+      luôn ghi một bản ghi mới, không điều kiện. Library giờ chỉ có MỘT đường ghi — nút
+      **Save to library** — không có backstop tự động nào nữa. Đóng tab và **Replace base
+      image…** giờ hỏi xác nhận thẳng ("...unless you already saved it to the Library")
+      thay vì ngầm định là an toàn; crop thì không hỏi (không xoá annotation nào, chỉ dịch
+      toạ độ), xem `applyCrop()`.
 - [x] **Chính sách lưu trữ / tự xoá.** Không tách khỏi mục trên, làm cùng lúc, không phải
       sau. Mặc định **giữ 14 ngày**, chỉnh được 7/14/30/không bao giờ ngay trong tab
       Library; hạ xuống một mốc ngắn hơn thì xoá phần quá hạn ngay, không đợi lần mở sau.
