@@ -21,6 +21,17 @@ deliberate cut, not an oversight — see "What this is NOT" below.
    opens with the capture already dropped in. Snapping again — from the same page or a
    different one — never overwrites it: the new capture opens as its own tab in the strip
    above the canvas, and the old one stays right there to switch back to and copy from.
+   **Snap a window/screen…** (`Ctrl+Shift+9` — a **global** shortcut, so it fires even while
+   another app has focus; Chrome only allows that for `Ctrl+Shift+[0-9]` combos, see the
+   comment on `captureDesktop()` in `background.js`) is the same idea for anything
+   `captureVisibleTab` can't reach — another app's window, a second monitor, the whole
+   desktop: it opens Chrome's own screen/window picker (via `chrome.desktopCapture`, the one
+   API that can be triggered from anywhere and still land the grab in a stable tab), grabs
+   one frame once you pick a source, and always opens it as its own new tab — same as a
+   whole-tab or region snap, never merged into whatever's already open. There's no live
+   drag-to-select for this path (a selection overlay can't be injected into another app's
+   window), so the crop tool opens immediately on the full frame instead — drag it down to
+   the part you want, `Enter` to apply, `Esc` to keep the whole shot.
 3. Add components from the left rail, drag them into place, edit text/options on the
    right. Toggle **Context stamp** in the topbar on/off.
 4. **⧉ Copy image** — or just `Ctrl+C` with the stage focused — to paste straight into a

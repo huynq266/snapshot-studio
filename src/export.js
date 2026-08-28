@@ -16,7 +16,7 @@
   };
 
   function init(deps) {
-    const { getCapture, getView, stage, toast, hasExt, cropDataUrl, loadImage, loadCapture, select, setView } = deps;
+    const { getCapture, getView, stage, toast, hasExt, cropDataUrl, loadImage, loadCapture, select, setView, startCrop } = deps;
 
     function dataUrlToBlob(dataUrl) {
       const [head, b64] = dataUrl.split(',');
@@ -171,6 +171,68 @@
       select(el.id);
       toast(`Pasted as a new image layer (${img.naturalWidth}×${img.naturalHeight}).`);
     }
+
+    /** Consumes the streamId handed over by background.js's chrome.desktopCapture flow
+     *  (see its own comment for why the picker and the actual capture happen in two
+     *  different places). One frame only — this is a screenshot tool, not a recorder —
+     *  so the track is stopped the instant the frame is grabbed, which also drops
+     *  Chrome's "sharing your screen" indicator right away instead of leaving it up.
+     *
+     *  Always lands as its OWN new tab via loadCapture() — never merged into whatever
+     *  capture is already open — same as the whole-tab and region snap paths. This is
+     *  deliberately NOT routed through pasteImageFile(): that one is Ctrl+V's "add a
+     *  layer onto the current shot" behaviour, which is right for a clipboard paste but
+     *  wrong for a Snap action (nobody expects "Snap a window" to bury their in-progress
+     *  annotations under a new image).
+     *
+     *  There is no live region-select for this path — you can't inject a selection
+     *  overlay into another application's window, only into pages this extension
+     *  controls — so instead the whole frame lands first and startCrop() opens
+     *  immediately on it: drag the frame down to the part you actually wanted, Enter to
+     *  apply, or Esc to keep the whole shot. Same crop tool, same cropDataUrl(), as
+     *  every other capture in this editor. */
+    async function captureDesktopStream(streamId) {
+      let stream;
+      try {
+        const dpr = window.devicePixelRatio || 1;
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            mandatory: {
+              chromeMediaSource: 'desktop',
+              chromeMediaSourceId: streamId,
+              // without explicit max bounds Chrome defaults to a low-res capture
+              maxWidth: Math.round(screen.width * dpr),
+              maxHeight: Math.round(screen.height * dpr),
+            },
+          },
+        });
+      } catch (e) {
+        toast('Could not start the screen capture: ' + (e && e.message || e));
+        return;
+      }
+      try {
+        const track = stream.getVideoTracks()[0];
+        const bitmap = await new ImageCapture(track).grabFrame();
+        const canvas = document.createElement('canvas');
+        canvas.width = bitmap.width; canvas.height = bitmap.height;
+        canvas.getContext('2d').drawImage(bitmap, 0, 0);
+        const blob = await new Promise((res) => canvas.toBlob(res, 'image/png'));
+        if (!blob) throw new Error('could not read the captured frame');
+        const dataUrl = await readAsDataUrl(blob);
+        setView('snap');
+        await loadCapture({
+          id: 'desktop_' + Date.now() + '-' + Math.random().toString(36).slice(2, 7),
+          dataUrl, url: '', rect: null,
+          note: 'Captured from your window/screen. Drag the crop frame to trim it, Enter to apply, or Esc to keep it all.',
+        });
+        startCrop();
+      } catch (e) {
+        toast('Screen capture failed: ' + (e && e.message || e));
+      } finally {
+        stream.getTracks().forEach((t) => t.stop());
+      }
+    }
+    window.SnapKit.export.captureDesktopStream = captureDesktopStream;
 
     document.addEventListener('paste', (e) => {
       if (isTyping()) return;                       // pasting CSS into the Components tab must still work

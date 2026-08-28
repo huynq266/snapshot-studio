@@ -749,27 +749,87 @@
 
   // ---- capture tabs ---------------------------------------------------------
   const snapTabs = $('#snapTabs');
+  // `cap.name`, when set, overrides the host/"Untitled capture" default — see
+  // startRenameTab() below. Threaded through serializeCaptures()/restoreSession()
+  // so a rename survives a reload; NOT threaded into the Library's `snaps` store,
+  // which is a separate, user-triggered archive rather than live tab state.
   function tabLabel(cap) {
+    if (cap.name) return cap.name;
     if (cap.url) { try { return new URL(cap.url).host; } catch (e) {} }
     return 'Untitled capture';
   }
+  /** `.snap-tab` is a plain div (not a real <button>) specifically so an <input>
+   *  can be swapped in for renaming without nesting interactive content inside a
+   *  button, which browsers tolerate inconsistently. tabIndex/role/keydown below
+   *  keep it keyboard-operable the way a button would be. */
   function renderTabs() {
     if (!snapTabs) return;
     snapTabs.innerHTML = '';
     captures.forEach((cap) => {
-      const tab = document.createElement('button');
-      tab.type = 'button';
+      const tab = document.createElement('div');
       tab.className = 'snap-tab' + (cap === capture ? ' on' : '');
-      tab.title = tabLabel(cap);
+      tab.title = tabLabel(cap) + ' — double-click the name to rename';
+      tab.tabIndex = 0;
+      tab.setAttribute('role', 'button');
       tab.innerHTML = `<img class="snap-tab-thumb" src="${cap.img.dataUrl}" alt="">`
         + `<span class="snap-tab-label">${escapeHtml(tabLabel(cap))}</span>`
         + `<span class="snap-tab-close" title="Close this tab" aria-label="Close this tab">✕</span>`;
       tab.addEventListener('click', (e) => {
         if (e.target.closest('.snap-tab-close')) { closeTab(cap); return; }
+        if (e.target.closest('.snap-tab-rename')) return;   // mid-rename input — let it handle its own clicks
+        // e.detail is the browser's own click-count for this event (2 on the second
+        // click of a double-click) — reading it fresh here, rather than a separate
+        // 'dblclick' listener bound to this specific node, is what keeps this correct
+        // even though the FIRST click of the pair already ran switchTab() below and
+        // rebuilt the whole tab strip out from under any node a dblclick handler
+        // would have been bound to.
+        if (e.target.closest('.snap-tab-label') && e.detail >= 2) { startRenameTab(tab, cap); return; }
         switchTab(cap);
+      });
+      tab.addEventListener('keydown', (e) => {
+        if (e.target !== tab) return;   // typing into the rename input is handled by startRenameTab()
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); switchTab(cap); }
       });
       snapTabs.appendChild(tab);
     });
+  }
+  /** Swaps the tab's label for a text input in place. Commits on Enter/blur,
+   *  reverts on Escape; an empty name clears the override back to the auto
+   *  label rather than storing an empty string. */
+  function startRenameTab(tabEl, cap) {
+    if (tabEl.classList.contains('editing')) return;
+    tabEl.classList.add('editing');
+    const labelEl = tabEl.querySelector('.snap-tab-label');
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'snap-tab-rename';
+    input.maxLength = 60;
+    input.value = tabLabel(cap);
+    labelEl.replaceWith(input);
+    input.focus();
+    input.select();
+    // renderTabs() below (via commit/cancel) tears this input out of the DOM,
+    // which fires its own 'blur' — the flag stops that from re-running commit().
+    let done = false;
+    const commit = () => {
+      if (done) return;
+      done = true;
+      const v = input.value.trim();
+      if (v) cap.name = v; else delete cap.name;
+      renderTabs();
+      saveSessionNow();
+    };
+    const cancel = () => {
+      if (done) return;
+      done = true;
+      renderTabs();
+    };
+    input.addEventListener('keydown', (e) => {
+      e.stopPropagation();   // don't let Enter/Escape also hit the tab's own keydown handler
+      if (e.key === 'Enter') { e.preventDefault(); commit(); }
+      else if (e.key === 'Escape') { e.preventDefault(); cancel(); }
+    });
+    input.addEventListener('blur', commit);
   }
   function switchTab(cap) {
     if (cap === capture) return;
@@ -828,7 +888,7 @@
   // restoreSession() below can put it all back before that pipeline runs.
   function serializeCaptures() {
     return captures.map((c) => ({
-      id: c.id, url: c.url,
+      id: c.id, url: c.url, name: c.name,
       capturedAt: c.capturedAt instanceof Date ? c.capturedAt.getTime() : Date.now(),
       img: { dataUrl: c.img.dataUrl, w: c.img.w, h: c.img.h },   // never `.el` — see loadCapture()'s comment on why it isn't serializable/needed
       els: JSON.parse(JSON.stringify(c.els)),
@@ -858,7 +918,7 @@
       try {
         const img = await loadImage(t.img.dataUrl);
         const restored = {
-          id: t.id, url: t.url || '',
+          id: t.id, url: t.url || '', name: t.name || undefined,
           capturedAt: new Date(t.capturedAt || Date.now()),
           img: { dataUrl: t.img.dataUrl, w: img.naturalWidth, h: img.naturalHeight, el: img },
           els: JSON.parse(JSON.stringify(t.els || [])),
@@ -1053,7 +1113,7 @@
     getView: () => view,
     stage, toast, hasExt,
     cropDataUrl, loadImage, loadCapture,
-    select, setView,
+    select, setView, startCrop,
   });
   SnapKit.library.init({
     getCapture: () => capture,
@@ -1100,6 +1160,7 @@
   if (hasExt) {
     chrome.runtime.onMessage.addListener((msg) => {
       if (msg && msg.type === 'snap-capture') loadCapture({ id: msg.id, dataUrl: msg.dataUrl, url: msg.url, rect: msg.rect });
+      if (msg && msg.type === 'snap-desktop-stream') SnapKit.export.captureDesktopStream(msg.streamId);
     });
   }
 })();

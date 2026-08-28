@@ -29,6 +29,17 @@ document.getElementById('captureRegion').addEventListener('click', () => {
   });
 });
 
+document.getElementById('captureDesktop').addEventListener('click', () => {
+  setStatus('Opening the picker…');
+  chrome.runtime.sendMessage({ type: 'capture-desktop' }, (res) => {
+    const err = chrome.runtime.lastError;
+    if (err) { setStatus('Error: ' + err.message); return; }
+    if (res && res.error) { setStatus('Could not start: ' + res.error); return; }
+    // The picker is native Chrome UI, not this popup; close so it isn't in the way.
+    window.close();
+  });
+});
+
 async function openEditor() {
   const tabs = await chrome.tabs.query({});
   const found = tabs.find((t) => t.url && t.url.startsWith(editorUrl));

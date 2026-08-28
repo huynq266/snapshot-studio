@@ -161,10 +161,55 @@ async function finishRegionCapture(rect, dpr) {
   await focusEditor(editor);
 }
 
+// ---- desktop/window snap ----------------------------------------------------
+// Unlike whole-tab/region snap, there is no browser tab to screenshot here — the
+// source is a native window or the whole screen, which chrome.tabs.captureVisibleTab
+// fundamentally cannot reach (see README's "How export actually works"). This is the
+// one capture path that has to run through chrome.desktopCapture: it's the only API
+// that (a) can be invoked from this service worker — no window/DOM needed on the
+// caller's side, just to show the native picker — and (b) hands back a short-lived
+// streamId instead of pixels, so the actual capture happens later in the editor tab,
+// which is a real page and won't get torn down mid-picker the way an extension
+// popup would (popups close on blur, and the OS/tab picker stealing focus kills them
+// before getUserMedia can resolve — that's the whole reason this API is split in two).
+//
+// The command's shortcut is Ctrl+Shift+9 with "global": true in manifest.json — Chrome
+// only allows a command to fire while some other app has focus if it's marked global,
+// and global commands are restricted to the Ctrl+Shift+[0-9] combos (Chrome enforces
+// this to keep extensions from hijacking arbitrary OS-level shortcuts).
+function waitTabReady(tabId) {
+  return new Promise((resolve) => {
+    chrome.tabs.get(tabId).then((tab) => {
+      if (tab.status === 'complete') return resolve();
+      function onUpdated(id, info) {
+        if (id === tabId && info.status === 'complete') { chrome.tabs.onUpdated.removeListener(onUpdated); resolve(); }
+      }
+      chrome.tabs.onUpdated.addListener(onUpdated);
+    }).catch(resolve);
+  });
+}
+
+async function captureDesktop() {
+  if (!chrome.desktopCapture) return { error: 'desktopCapture API not available — reload the extension.' };
+  const editor = await ensureEditor();
+  await waitTabReady(editor.id);            // the streamId is single-use and short-lived;
+  let editorTab;                             // don't risk it expiring while a fresh editor
+  try { editorTab = await chrome.tabs.get(editor.id); } // tab is still loading its scripts
+  catch (e) { return { error: 'Could not open the Snap Studio tab.' }; }
+
+  chrome.desktopCapture.chooseDesktopMedia(['screen', 'window'], editorTab, (streamId) => {
+    if (!streamId) return; // user cancelled the picker — nothing to do
+    chrome.runtime.sendMessage({ type: 'snap-desktop-stream', streamId }, () => void chrome.runtime.lastError);
+    focusEditor(editor).catch(() => {});
+  });
+  return { ok: true };
+}
+
 // ---- triggers --------------------------------------------------------------
 chrome.commands.onCommand.addListener((cmd) => {
   if (cmd === 'capture') captureWholeTab().catch((e) => console.warn('[snap-studio] capture error:', e));
   if (cmd === 'capture-region') startRegionCapture().catch((e) => console.warn('[snap-studio] region-start error:', e));
+  if (cmd === 'capture-desktop') captureDesktop().catch((e) => console.warn('[snap-studio] desktop capture error:', e));
 });
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -176,6 +221,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
   if (msg.type === 'capture-region-start') {
     startRegionCapture().then(sendResponse).catch((e) => sendResponse({ error: String(e && e.message || e) }));
+    return true;
+  }
+  if (msg.type === 'capture-desktop') {
+    captureDesktop().then(sendResponse).catch((e) => sendResponse({ error: String(e && e.message || e) }));
     return true;
   }
   if (msg.type === 'ugs-region-selected') {
