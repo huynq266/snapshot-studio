@@ -679,7 +679,17 @@
     });
   }
   function loadImage(dataUrl) {
-    return new Promise((resolve, reject) => { const img = new Image(); img.onload = () => resolve(img); img.onerror = reject; img.src = dataUrl; });
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      // Reject with a real Error, not the raw ErrorEvent: an Event has no
+      // `.message`, so anything that stringifies the failure — snap-bridge's
+      // reply path especially — turns the whole thing into "[object Event]"
+      // and the actual cause is gone. Say what failed to decode instead.
+      img.onerror = () => reject(new Error(
+        `image failed to decode (${dataUrl ? `${dataUrl.length} chars, starts "${String(dataUrl).slice(0, 40)}"` : 'empty/missing data URL'})`));
+      img.src = dataUrl;
+    });
   }
 
   /** `replaceInPlace` is only ever passed by the "Replace base image…" upload
@@ -1135,6 +1145,10 @@
     render, select, getView: () => view, setView, toast,
   });
   SnapKit.kb.init({ toast });
+  SnapKit.renderApi.init({
+    getCapture: () => capture,
+    loadCapture, newElement, select, toast, render,
+  });
 
   // ---- wiring to the extension's capture pipeline --------------------------
   // Session restore first, unconditionally (IndexedDB works the same whether or

@@ -25,6 +25,11 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink);
 .btn.sm { padding: 7px 11px; font-size: var(--text-xs); }
 .btn.ghost { background: transparent; border-color: transparent; }
 .btn.ghost:hover { background: var(--paper); }
+/* Quiet by default, same reasoning as .del-row below: an always-on red
+   button is a warning nobody triggered yet, and reads as decoration after
+   a few minutes. Commits to red only once the pointer is actually on it. */
+.btn.danger { color: var(--down); }
+.btn.danger:hover { background: var(--down); border-color: var(--down); color: var(--color-neutral-0); }
 .btn:disabled { opacity: .5; cursor: not-allowed; }
 .kbd { font-family: var(--mono); font-size: 10.5px; background: var(--paper); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 1px 5px; }
 
@@ -375,19 +380,137 @@ body.render .lab, body.render .library, body.render .kb, body.render .viewtabs {
 .kit-doc p { font-size: var(--text-xs); line-height: 1.6; color: var(--ink-2); margin: var(--space-2) 0 0; }
 
 /* =====================================================================
-   KB TAB — topology B: upload a spec, spawn an agent, watch it work.
-   Same furniture as the other two tabs (rail + .btn + .empty-hint); only
-   the log pane on the right is new. Never exported: display:none under
+   KB TAB — topology B. Rail is a job board: existing kb/ articles, plus a
+   pinned "+ New job" entry that opens the instruction/session-tabs form
+   (its own nested rail + log, same two-column shape the whole tab used to
+   be before the job board existed). Same furniture as the other two tabs
+   (rail + .btn + .empty-hint). Never exported: display:none under
    body.render, same as .lab.
    ===================================================================== */
-.kb { flex: 1; display: grid; grid-template-columns: 260px 1fr; min-height: 0; }
+.kb { flex: 1; display: grid; grid-template-columns: 220px 1fr; min-height: 0; }
 .kb-rail { background: var(--surface); border-right: 1px solid var(--line); overflow-y: auto; padding: var(--space-4) 14px; }
 .kb-rail h3 { font-size: 11px; font-weight: var(--weight-bold); letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin: 0 0 var(--space-2); }
 .kb-rail h3:not(:first-child) { margin-top: 22px; }
 .kb-filename { font-size: var(--text-xs); color: var(--ink-2); margin: var(--space-2) 0 0; word-break: break-all; }
-.kb-domain-input { width: 100%; font-family: var(--mono); font-size: var(--text-sm); padding: var(--space-2) var(--space-3);
-  border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--paper); color: var(--ink); }
-.kb-domain-input:focus { outline: 2px solid var(--accent-line); outline-offset: 1px; border-color: var(--accent); }
+
+.kb-main { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.kb-new-job-panel { flex: 1; display: grid; grid-template-columns: 260px 1fr; min-height: 0; }
+/* Same [hidden]-vs-author-display footgun as .kb-banner above, caught the
+   same way (rendering editor.html and looking): bridge-kb.js toggles this
+   panel and .kb-article-panel via the plain hidden attribute when switching
+   job-board selection, and each one's own unconditional `display` rule
+   otherwise wins over [hidden]'s UA-stylesheet default. */
+.kb-new-job-panel[hidden], .kb-article-panel[hidden] { display: none; }
+.kb-new-job-form { padding: var(--space-4) 14px; }
+
+.kb-jobboard { list-style: none; margin: 0 0 var(--space-4); padding: 0; display: flex; flex-direction: column; gap: var(--space-1); }
+.kb-jobboard-new, .kb-jobboard-item { display: block; width: 100%; text-align: left; font-family: inherit; font-size: var(--text-xs);
+  background: var(--paper); border: 1px solid var(--line); border-radius: var(--radius-md); padding: var(--space-2) var(--space-3);
+  cursor: pointer; color: var(--ink-2); }
+.kb-jobboard-new:hover, .kb-jobboard-item:hover { border-color: var(--accent-line); background: var(--accent-soft); }
+.kb-jobboard-new[data-selected="true"], .kb-jobboard-item[data-selected="true"] {
+  border-color: var(--accent); background: var(--accent-soft); color: var(--accent-ink); }
+.kb-jobboard-item-title { display: block; font-size: var(--text-xs); font-weight: var(--weight-semibold); color: var(--ink);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.kb-jobboard-item-meta { display: block; font-size: 10.5px; color: var(--muted); margin-top: 2px; }
+
+.kb-article-panel { flex: 1; display: flex; flex-direction: column; min-height: 0; min-width: 0; padding: var(--space-4); overflow: hidden; }
+.kb-article-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); margin-bottom: var(--space-3); }
+.kb-article-head-actions { display: flex; align-items: center; gap: var(--space-2); }
+.kb-article-savenote { font-size: var(--text-xs); color: var(--muted); }
+.kb-article-head-divider { width: 1px; align-self: stretch; background: var(--line); margin: 0 var(--space-1); }
+.kb-article-title { font-size: var(--text-md); font-weight: var(--weight-semibold); color: var(--ink); margin: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.kb-article-split { flex: 1; display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); min-height: 0; }
+.kb-article-editor { font-family: var(--mono); font-size: var(--text-xs); line-height: 1.6; background: var(--paper);
+  border: 1px solid var(--line); border-radius: var(--radius-lg); padding: var(--space-4); margin: 0; color: var(--ink);
+  resize: none; }
+.kb-article-editor:focus { outline: 2px solid var(--accent-line); outline-offset: -2px; border-color: var(--accent); }
+.kb-article-preview { font-size: var(--text-sm); line-height: 1.6; color: var(--ink); background: var(--surface);
+  border: 1px solid var(--line); border-radius: var(--radius-lg); padding: var(--space-4); overflow-y: auto; }
+.kb-article-preview h1, .kb-article-preview h2, .kb-article-preview h3,
+.kb-article-preview h4, .kb-article-preview h5, .kb-article-preview h6 {
+  margin: var(--space-4) 0 var(--space-2); font-weight: var(--weight-semibold); }
+.kb-article-preview h1:first-child, .kb-article-preview h2:first-child { margin-top: 0; }
+.kb-article-preview p { margin: 0 0 var(--space-3); }
+.kb-article-preview ul, .kb-article-preview ol { margin: 0 0 var(--space-3); padding-left: var(--space-5); }
+.kb-article-preview li { margin: 0 0 var(--space-1); }
+.kb-article-preview blockquote { border-left: 3px solid var(--accent-line); margin: 0 0 var(--space-3);
+  padding: var(--space-1) 0 var(--space-1) var(--space-3); color: var(--ink-2); }
+.kb-article-preview hr { border: none; border-top: 1px solid var(--line); margin: var(--space-4) 0; }
+.kb-article-preview code { font-family: var(--mono); font-size: 0.92em; background: var(--paper);
+  padding: 1px 4px; border-radius: var(--radius-sm); }
+.kb-article-preview pre { font-family: var(--mono); font-size: var(--text-xs); background: var(--paper);
+  border: 1px solid var(--line); border-radius: var(--radius-md); padding: var(--space-3); margin: 0 0 var(--space-3);
+  overflow-x: auto; }
+.kb-article-preview pre code { background: none; padding: 0; }
+.kb-article-preview table { border-collapse: collapse; width: 100%; margin: 0 0 var(--space-3); font-size: var(--text-xs); }
+.kb-article-preview th, .kb-article-preview td { border: 1px solid var(--line); padding: var(--space-1) var(--space-2); text-align: left; }
+.kb-article-preview th { background: var(--paper); font-weight: var(--weight-semibold); }
+.kb-article-preview a.kb-md-link { color: var(--accent-ink); text-decoration: underline; cursor: default; }
+
+.kb-article-preview .kb-md-figure { margin: 0 0 var(--space-3); }
+.kb-article-preview .kb-md-figure figcaption { font-size: 10.5px; color: var(--muted); margin-top: var(--space-1); }
+.kb-article-preview .kb-md-imgwrap { position: relative; display: inline-block; max-width: 100%; line-height: 0; }
+.kb-article-preview .kb-md-img { display: block; max-width: 100%; border-radius: var(--radius-md); border: 1px solid var(--line);
+  background: var(--paper); min-height: 40px; min-width: 120px; }
+/* Before hydrateImages() resolves a data: URL, the <img> has no src — the
+   min-height/min-width above keep it from collapsing to 0x0 (which would
+   also make any pin on it un-clickable) while it's empty or failed. */
+.kb-article-preview .kb-md-imgwrap--broken .kb-md-img { opacity: .35; }
+.kb-comment-mode-on .kb-md-imgwrap { cursor: crosshair; }
+
+.kb-comment-pin { position: absolute; transform: translate(-50%, -50%); width: 22px; height: 22px; border-radius: var(--radius-full);
+  background: var(--accent); color: var(--color-neutral-0); border: 2px solid var(--surface); font-size: 11px;
+  line-height: 1; display: flex; align-items: center; justify-content: center; cursor: pointer; padding: 0;
+  box-shadow: 0 1px 3px rgba(var(--color-neutral-900-rgb),.3); }
+.kb-comment-pin:hover { filter: brightness(1.1); }
+.kb-comment-pin--resolved { background: var(--muted); }
+
+.kb-comment-popover { position: absolute; z-index: 5; width: 220px; background: var(--surface); border: 1px solid var(--line);
+  border-radius: var(--radius-lg); box-shadow: 0 4px 16px rgba(var(--color-neutral-900-rgb),.18); padding: var(--space-3);
+  cursor: auto; }
+.kb-comment-popover p { font-size: var(--text-xs); color: var(--ink); margin: 0 0 var(--space-2); white-space: pre-wrap; }
+.kb-comment-popover textarea { width: 100%; min-height: 60px; font-family: var(--font-sans); font-size: var(--text-xs);
+  border: 1px solid var(--line); border-radius: var(--radius-md); padding: var(--space-2); resize: vertical; box-sizing: border-box; }
+.kb-comment-popover-actions { display: flex; justify-content: flex-end; gap: var(--space-2); margin-top: var(--space-2); }
+
+#kbCommentModeBtn.on { background: var(--accent); color: var(--color-neutral-0); border-color: var(--accent); }
+
+.kb-history-wrap { position: relative; }
+.kb-history-panel { position: absolute; top: 100%; right: 0; margin-top: var(--space-1); width: 280px; max-height: 320px;
+  overflow-y: auto; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg);
+  box-shadow: 0 4px 16px rgba(var(--color-neutral-900-rgb),.18); padding: var(--space-2); z-index: 6; }
+/* Same [hidden]-vs-author-display footgun as .kb-banner/.kb-new-job-panel/
+   .kb-article-panel above — this one caught BEFORE shipping this time,
+   from having been bitten by it twice already this session. */
+.kb-history-panel[hidden] { display: none; }
+.kb-history-item { display: flex; align-items: center; gap: var(--space-1); padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm); }
+.kb-history-item:hover { background: var(--paper); }
+.kb-history-item-label { flex: 1; min-width: 0; font-size: var(--text-xs); color: var(--ink-2); overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+.kb-textarea { width: 100%; font-family: var(--font-sans); font-size: var(--text-sm); padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--paper); color: var(--ink); resize: vertical; }
+.kb-textarea:focus { outline: 2px solid var(--accent-line); outline-offset: 1px; border-color: var(--accent); }
+
+.kb-session-group { margin-top: var(--space-3); }
+.kb-session-label { display: flex; align-items: center; justify-content: space-between; font-size: var(--text-xs);
+  font-weight: var(--weight-semibold); color: var(--muted); margin: 0 0 var(--space-2); }
+.kb-session-refresh { font-family: inherit; font-size: var(--text-xs); font-weight: var(--weight-medium); background: transparent;
+  border: none; color: var(--accent-ink); cursor: pointer; padding: 0; }
+.kb-session-refresh:hover { text-decoration: underline; }
+.kb-session-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-1); }
+.kb-session-item { display: flex; align-items: center; gap: var(--space-2); background: var(--paper); border: 1px solid var(--line);
+  border-radius: var(--radius-md); padding: var(--space-1) var(--space-2); }
+.kb-session-item-label { flex: 1; min-width: 0; font-size: var(--text-xs); color: var(--ink-2); overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+.kb-session-item-btn { flex: none; font-family: inherit; font-size: var(--text-sm); line-height: 1; font-weight: var(--weight-bold);
+  background: transparent; border: 1px solid var(--line); border-radius: var(--radius-sm); color: var(--ink-2); cursor: pointer;
+  width: 20px; height: 20px; display: flex; align-items: center; justify-content: center; padding: 0; }
+.kb-session-item-btn:hover { border-color: var(--accent-line); color: var(--accent-ink); background: var(--accent-soft); }
+.kb-session-item-btn:disabled { opacity: .5; cursor: not-allowed; }
 
 .kb-log-wrap { min-width: 0; padding: var(--space-4); overflow-y: auto; }
 .kb-log { font-family: var(--mono); font-size: var(--text-xs); line-height: 1.6; background: var(--paper);
@@ -401,4 +524,11 @@ body.render .lab, body.render .library, body.render .kb, body.render .viewtabs {
 .kb-banner { display: flex; align-items: center; gap: var(--space-2); margin-left: var(--space-3); padding: 6px var(--space-3);
   border-radius: var(--radius-full); background: var(--color-warning-50); border: 1px solid var(--color-warning-500);
   color: var(--color-warning-700); font-size: var(--text-xs); font-weight: var(--weight-semibold); }
+/* Same footgun as .tb-actions above: this element's own `display: flex` is an
+   author rule and outranks the [hidden] default from the UA stylesheet at
+   equal specificity, so bridge-kb.js's `banner.hidden = !running` toggle had
+   no visual effect — the banner showed even with no job running. Caught by
+   actually rendering editor.html (via file://) and looking, not by reading
+   the JS, which looked correct in isolation. */
+.kb-banner[hidden] { display: none; }
 .pal-btn small { font-weight: var(--weight-medium); font-size: 10.5px; color: var(--muted); margin-left: 3px; }

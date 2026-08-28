@@ -55,6 +55,17 @@
       return { id: el.id, ...pos };
     }
 
+    /** The annotation list as it stands right now, for snap-bridge's headless
+     *  renderer (snap-bridge/render.mjs) to reproduce without going through
+     *  captureVisibleTab — which is what caps the old export path at the
+     *  window's own size. Returns a structured clone so a later edit in this
+     *  tab cannot mutate what the renderer already received. */
+    function cmdGetEls() {
+      const capture = getCapture();
+      if (!capture) throw new Error('no capture is open — call snap_open first');
+      return { els: JSON.parse(JSON.stringify(capture.els)), width: capture.img.w, height: capture.img.h };
+    }
+
     // Maximizing first is what makes `strict` meaningful: renderToPngDataUrl() measures
     // the window as it finds it, and a caller with no toast to read needs the window
     // actually big enough, not just an error explaining that it was not.
@@ -88,6 +99,7 @@
         if (cmd === 'open') return cmdOpen(args || {});
         if (cmd === 'add') return cmdAdd(args || {});
         if (cmd === 'export') return cmdExport();
+        if (cmd === 'get_els') return cmdGetEls();
         throw new Error(`unknown command "${cmd}"`);
       })().then((data) => reply(reqId, true, data), (err) => reply(reqId, false, err));
     });

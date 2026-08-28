@@ -10,6 +10,10 @@ portal của app, Snap Studio chú thích ảnh, và kết quả là một bài 
   review.** Mã ở `snap-bridge/` + `src/bridge-worker.js` + `src/bridge-editor.js`. Topology B
   (UI Snap Studio tự spawn Agent SDK) đã có kế hoạch chi tiết ở mục 7 dưới, **chưa dựng**. Kế
   hoạch triển khai đầy đủ (cả hai topology, từng bước): `C:\Users\huyng\.claude\plans\witty-sniffing-garden.md`.
+- **Bước tiếp theo — nâng lên KB Studio: `KB-STUDIO-PLAN.md`** (lập 2026-08-28). Kế hoạch 5
+  phase lấy từ Guide Studio của `ownegoMarketingMaterialToolkit` — nhánh anh em của repo này,
+  đã giải xong tầng orchestration mà đây còn thiếu: render headless (xoá bẫy cắt ảnh ở mục 2
+  dưới), `job.json` để re-render rẻ, neo annotation vào selector thật, và UI studio để review.
 
 ## Kết quả trial (2026-08-27)
 
@@ -92,6 +96,161 @@ chỉnh (`x1,y1,x2,y2,shape:"curved"`) render đúng toạ độ, đúng dạng 
 bug: response của `snap_add` báo `(undefined, undefined)` cho arrow vì code cũ giả định mọi
 component đều có `el.x/el.y`. Sửa cả `src/bridge-editor.js`'s `cmdAdd()` (trả `x1/y1/x2/y2`
 khi `el.type === 'arrow'`) và `snap-bridge/server.js`'s format response.
+
+### Điều khiển nội dung trong iframe cross-origin (2026-08-28)
+
+Job KB đầu tiên báo không cuộn/tìm/click được nội dung app Qikify nhúng trong Shopify admin:
+`mcp__chrome__scroll` cuộn 3000px không đổi pixel nào, `mcp__chrome__find` trả 0 match cho
+text đang hiện rõ trên màn hình. Nguyên nhân: app chạy trong **iframe cross-origin**
+(`bkv-embedded.qikify.com` trong `admin.shopify.com`), và `activeTab` của Chrome Bridge chỉ
+cấp host permission cho **origin của frame chính**, không lan xuống iframe khác origin — đã
+xác minh qua doc chính thức, và qua schema thật của ba tool đó (không có tham số nhắm frame,
+chỉ có `tabId`). `snap_capture_tab`/`take_screenshot` vẫn chụp được vì chúng làm việc ở tầng
+compositor, không cần chạy JS trong DOM của frame.
+
+Cách vá: `chrome.webNavigation.getAllFrames()` + `chrome.scripting.executeScript({target:
+{frameIds}})` — injection được cấp quyền qua `host_permissions` của **chính Snap Studio**
+(`<all_urls>`, đã có sẵn), không qua same-origin policy của trang. Thêm `webNavigation` vào
+`permissions`; bốn tool mới `snap_frame_list` / `snap_frame_scroll` / `snap_frame_find` /
+`snap_frame_click` trong `src/bridge-worker.js` + `snap-bridge/server.js`. Đã test thật:
+liệt kê đúng iframe, cuộn tới đúng vị trí, click đổi đúng state (xác nhận cả bằng ảnh xuất
+lẫn bằng đọc property sống).
+
+**Ba bug tự gây ra trong lần dựng này, đều là bài học chung chứ không riêng trang này:**
+
+1. **Selector sinh ra không duy nhất — bug nghiêm trọng nhất, tốn 6 vòng thử sai.**
+   `pageFind` dựng selector từ tag + `nth-of-type` với giới hạn 6 tầng, không neo vào đâu cả:
+   `ul > li:nth-of-type(1) > div > label > span:nth-of-type(2) > span`. Component kit lặp lại
+   y hệt cấu trúc markup cho mọi instance, nên `document.querySelector()` trả về **match đầu
+   tiên trong toàn tài liệu** — radio "All products" của nhóm khác, không phải "Percentage"
+   đang cần. Tệ hơn: "All products" vốn đã được chọn sẵn, nên mọi lần click đều báo
+   `checked: true` một cách thuyết phục, và tôi đã kết luận nhầm rằng đây là "quirk không vá
+   được của Polaris/Qikify" — trong khi thực tế chưa từng click đúng phần tử nào. Người dùng
+   phát hiện ra bằng cách chỉ ra selector của họ (`[data-field-name="discount_type"] .Polaris-
+   RadioButton__ChoiceLabel`) có neo vào container duy nhất. Sửa: `uniqueSelector()` đi ngược
+   lên cây (và neo vào `id` duy nhất ngay khi gặp) tới khi selector thật sự resolve lại đúng
+   phần tử nó sinh ra từ đó; thêm cờ `selectorIsUnique` để trường hợp còn mơ hồ lộ ra thay vì
+   im lặng tác động nhầm.
+2. **Đọc `checked` qua `outerHTML` là sai.** Dump HTML chỉ phản ánh **attribute** `checked=""`;
+   set `.checked` bằng JS đổi **property** mà không đồng bộ ngược lại attribute. Phải đọc
+   thẳng property sống (`controlChecked`).
+3. **Ảnh chụp có thể trễ hơn state thật.** Vài lần chụp ngay sau click cho ảnh chưa re-render,
+   dẫn tới kết luận "click không ăn" trong khi DOM đã đổi. Đọc property là nguồn tin cậy;
+   ảnh chỉ để xác nhận cuối.
+
+**Đã thử và đã gỡ bỏ**: `chrome.debugger` + `Input.dispatchMouseEvent` (CDP) — dựng xong,
+chạy không lỗi, nhưng hoàn toàn thừa một khi selector đã đúng, mà lại đòi quyền `debugger`
+(banner "đang debug trình duyệt này"). Đã xoá `snap_frame_click_native` cùng quyền đó.
+Cũng từng đổi `executeScript` sang `world: 'MAIN'` theo một giả thuyết sai; đã trả về
+`ISOLATED` (mặc định an toàn hơn) và test lại xác nhận `ISOLATED` chưa từng là vấn đề.
+
+Bài học chung của cả ba lần đi sai trên: khi một thao tác "chạy không lỗi nhưng không có tác
+dụng", hãy nghi ngờ **mình đang tác động nhầm đối tượng** trước khi kết luận môi trường hay
+thư viện bên kia có quirk không vá được.
+
+### KB Studio UI (Phase 3) — instruction + session tabs thay cho MD + domain (2026-08-28)
+
+Hai đổi cấu trúc ở tab KB, thay cho phần "chốt qua hỏi trực tiếp người dùng" ở mục 7 gốc:
+
+**1. Instruction thay vì chỉ nhận MD.** Trước đây file `.md` là **bắt buộc** và là toàn bộ
+input — không có chỗ gõ lệnh. Giờ `#kbInstructionInput` (textarea) là input chính, **bắt
+buộc**; file `.md` (`#kbUploadBtn`) chuyển thành **tài liệu tham khảo, tuỳ chọn** — đưa vào
+`prompt` như bối cảnh nền, không phải nguồn sự thật. `buildPrompt()`/`buildSystemPrompt()`
+trong `kb-job.js` nói rõ với agent: instruction là việc thật phải làm, reference doc (nếu có)
+chỉ để tham khảo.
+
+**2. Session tabs thay domain allowlist.** Lý do đổi: domain allowlist chặn nhầm chỗ — nó hạn
+chế agent **mở tab để navigate** dựa trên so khớp chuỗi domain (dễ hụt khi có iframe khác
+origin, chuyển hướng, hoặc app cần nhiều domain), trong khi ranh giới thật sự nên là **tab
+nào người dùng cho phép đụng tới**, không phải **domain nào**. Chrome Bridge chính nó đã làm
+đúng việc này từ trước — mọi tool `mcp__chrome__*` nhận `tabId` **tuỳ chọn** nhưng bị khoá
+cứng vào "tab group của phiên nó" (theo đúng schema thật của các tool, xác nhận qua
+`ToolSearch`: "must be in this session's own tab group; any other tab is refused"), và
+`new_tab`/`navigate` khi không truyền `tabId` sẽ tự mở/dùng tab **trong group riêng của Chrome
+Bridge** — không phải group của Snap Studio.
+
+Vì group đó do process Chrome Bridge tự quản, Snap Studio không có API để đọc/ghi trực tiếp
+vào nó. Cách vá: dựng một whitelist tabId **riêng của Snap Studio**, độc lập, cùng mô hình
+UX ("mở sẵn tab, đưa vào phiên") nhưng không phụ thuộc group nội bộ của Chrome Bridge:
+
+- `bridge-worker.js`: `kbSessionTabIds` (Set, persist qua `chrome.storage.local`), tự dọn tab
+  đã đóng (`chrome.tabs.onRemoved` + prune khi load). Ba lệnh cục bộ `kb-session-cmd`
+  (`list`/`add`/`remove`) — **không** đi qua snap-bridge, thuần `chrome.tabs` nên trả lời tại
+  chỗ.
+- `bridge-kb.js`: hai danh sách trong rail — "In session" / "Open tabs" (nút refresh, thêm
+  bằng nút `+`, bỏ bằng nút `×`). Lúc bấm Start, snapshot `{id, title, url}` của các tab đang
+  trong session gửi kèm `kb_start`.
+- `kb-job.js`: `startJob({instruction, markdown, mdFilename, sessionTabs, ...})` — đòi
+  `sessionTabs` non-empty. `canUseTool` giờ khoá theo `tabId`, không theo domain: mọi tool có
+  tham số `tabId` (`mcp__chrome__*` **và** `snap_capture_tab`/`snap_frame_*`, cộng
+  `snap_add`'s `at.tabId`) phải trúng một tabId trong session, **thiếu `tabId` cũng bị từ
+  chối** (thiếu nghĩa là "dùng tab mặc định của Chrome Bridge" — nằm ngoài whitelist này).
+  `mcp__chrome__new_tab` bị chặn tuyệt đối — tool đó không có `tabId` để soát, và tab mới nó
+  mở rơi vào group của Chrome Bridge chứ không phải whitelist này.
+- **Tác dụng phụ quan trọng**: `mcp__snap__*` phải **rời khỏi `allowedTools`** để đi qua
+  `canUseTool` (một entry trong `allowedTools` bỏ qua `canUseTool` hoàn toàn — xác nhận lại
+  đúng cơ chế đã ghi ở mục 7 gốc, giờ áp dụng cho cả nhánh snap chứ không riêng chrome nữa).
+  `allowedTools: []`, mọi quyết định đi qua `canUseTool`.
+
+**Giới hạn đã biết, chưa vá**: whitelist chỉ là danh sách của Snap Studio; nếu một tab **có**
+trong whitelist này nhưng **không** nằm trong tab group nội bộ của Chrome Bridge, lệnh
+`mcp__chrome__*` trên tab đó vẫn bị chính Chrome Bridge từ chối (lỗi rõ ràng, không im lặng)
+— người dùng cần tab đó khả dụng ở cả hai phía. Không tự tạo/gắn Chrome Tab Group thật
+(`chrome.tabGroups`) để đồng bộ hai bên — cân nhắc thêm quyền + độ phức tạp so với lợi ích,
+để dành nếu sau này thấy cần.
+
+### Ảnh chụp bị ám vàng/cam — xác nhận không phải Chrome Bridge, không phải Night Light, nguồn thật chưa chốt (2026-08-28)
+
+Người dùng báo ảnh trong `kb/img/test-01-nav*.png` và `kb/demo-job/01-nav.png` bị dính một lớp
+tint vàng/cam ở góc, nghi do "tool Chrome bridge". Điều tra qua nhiều vòng, ghi lại đầy đủ vì
+kết luận đầu tiên **sai** (Night Light — người dùng xác nhận máy không bật):
+
+**1. Không phải Chrome Bridge.** So sánh trực tiếp, cùng lúc, cùng một trang trắng tuyệt đối
+(`background:#ffffff`, không nội dung): `mcp__chrome__take_screenshot` (Chrome Bridge, CDP
+`Page.captureScreenshot`) → ảnh trắng sạch tuyệt đối. `snap_capture_tab` (Snap Studio thật,
+`chrome.tabs.captureVisibleTab` trong `background.js:88`) → tint y hệt ảnh gốc bị báo lỗi, tái
+hiện được ngay lập tức. Tint đến từ đường capture thật Snap Studio dùng cho mọi người dùng, không
+phải công cụ test.
+
+**2. Không phải Night Light.** Giả thuyết ban đầu — người dùng xác nhận tính năng này đang tắt.
+
+**3. Không phải phần tử Chrome Bridge tự vẽ lên trang.** Nghi tiếp: Chrome Bridge có vẻ tiêm một
+`<div id="__cc_border">` (`position:fixed`, `z-index:2147483647`, nằm ngoài `<body>` nên sống sót
+qua `body.innerHTML = ''`) vào mọi trang nó điều khiển — khả năng nó là viền chỉ báo "tab đang bị
+điều khiển" và bị `captureVisibleTab` chụp trúng nhưng CDP tự loại khi chụp chính nó. **Đã bác
+bỏ bằng thực nghiệm**: poll style của phần tử này mỗi 20ms trong suốt một lần gọi `snap_capture_tab`
+thật (183 lần đọc, trải dài qua cả một lần gọi lỗi "image readback failed" và một lần thành công)
+— style **không đổi một lần nào**, luôn `width:0;height:0;border:0` (vô hình), trong khi ảnh chụp
+ra vẫn có tint. Phần tử này không phải nguồn.
+
+**Dữ liệu pixel đã đo được** (giải mã PNG thủ công bằng `zlib.inflateSync`, không qua thư viện —
+tránh phụ thuộc `sharp`/`pngjs` không có sẵn trong `snap-bridge/node_modules`), trên ảnh
+1920×889 chụp từ trang trắng tuyệt đối:
+
+| Điểm | RGB |
+|---|---|
+| 4 góc (0,0 / topRight / bottomLeft / bottomRight) | `[242,177,121]` – `[243,178,122]` — **gần như giống hệt nhau** |
+| 4 điểm giữa cạnh (midTop/midLeft/midBottom/midRight) | `[245,197,156]` – `[246,198,158]` — **gần như giống hệt nhau** |
+| Tâm ảnh, và điểm 25%/25% từ góc | `[255,255,255]` — **trắng tuyệt đối** |
+
+Đối xứng hoàn hảo theo cả 4 góc lẫn cả 4 cạnh, tâm ảnh trắng tinh — đúng hình dạng một
+**vignette toán học** (rơi dần đều từ viền vào tâm), không giống một dịch chuyển màu đồng đều
+(Night Light/ICC profile kiểu gamma-ramp thường tint **toàn ảnh như nhau**, không tạo vignette),
+cũng không giống artefact quang học thật (hiếm khi đối xứng hoàn hảo 4 góc/4 cạnh như vậy).
+
+**Giả thuyết còn lại, chưa kiểm chứng được** — nghiêng về một tính năng "adaptive
+brightness"/"chống lưu hình" ở tầng driver GPU hoặc hệ điều hành mà `chrome.tabs.captureVisibleTab`
+đọc trúng còn CDP thì không (vd: tính năng chống burn-in cho panel OLED của Windows 11, hoặc
+Intel Display Power Saving Technology / "Adaptive Brightness" trong driver đồ hoạ — cả hai đều
+được biết là làm tối/ám màu vùng sáng lớn tĩnh theo kiểu rơi dần từ viền, độc lập với Night
+Light). Chưa xác nhận được vì không nên tự dò registry/driver settings của máy người dùng khi
+chưa được hỏi. **Không có cách vá trong code dù nguồn là gì** —
+`chrome.tabs.captureVisibleTab({format:'png'})` không có tham số tắt color management; nếu xác
+nhận đúng nguồn thì hướng xử lý vẫn là phía driver/hệ điều hành, không phải sửa `background.js`.
+
+`kb/img/test-01-nav*.png` và `kb/demo-job/01-nav.png` là ảnh fixture của phiên test (không phải
+nội dung KB thật của người dùng) — xoá bằng nút Delete rồi chụp lại sau khi xác định/tắt được
+nguồn là đủ, không cần giữ.
 
 ---
 

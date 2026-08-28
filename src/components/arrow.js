@@ -122,7 +122,7 @@
     defaults(c) {
       return { x1: c.x - 100, y1: c.y + 70, x2: c.x + 50, y2: c.y - 30,
         shape: 'straight', elbow: 'h-then-v', curvature: 0.22, curveShift: 0,
-        scale: 1.5, secondary: false, origin: true, hideHead: false };
+        scale: 1.5, secondary: false, origin: false, hideHead: false };
     },
 
     inner(el) {
@@ -153,7 +153,7 @@
       ctx.seg('#pShape', 'shape', true, true);
     },
 
-    demo: { shape: 'straight', elbow: 'h-then-v', secondary: false, origin: true },
+    demo: { shape: 'straight', elbow: 'h-then-v', secondary: false, origin: false },
 
     labSpecimen(v) {
       const el = { x1: 24, y1: 132, x2: 244, y2: 28, shape: v.shape, elbow: v.elbow };

@@ -235,18 +235,62 @@
     </div>
   </main>
 
-  <!-- ============ KB tab: topology B — spawn an agent to build a KB article ============ -->
+  <!-- ============ KB tab: topology B — job board + spawn an agent to build a KB article ============ -->
   <main class="kb">
     <aside class="kb-rail">
-      <h3>Spec document</h3>
-      <button id="kbUploadBtn" class="btn sm block">Choose .md file…</button>
-      <p class="kb-filename" id="kbFilename">No file chosen.</p>
-      <h3>Allowed domain</h3>
-      <input type="text" id="kbDomainInput" class="kb-domain-input" placeholder="e.g. portal.example.com">
-      <p class="empty-hint">Required. The agent may only navigate within this domain or path — everything else is denied, and it's told to stop and report instead of trying to go around it. See <code>KB-BRIDGE.md</code> mục 7.</p>
+      <h3>Articles</h3>
+      <ul class="kb-jobboard">
+        <li class="kb-jobboard-new" id="kbJobBoardNew" data-selected="true">+ New job</li>
+      </ul>
+      <ul class="kb-jobboard" id="kbJobBoard"></ul>
     </aside>
-    <div class="kb-log-wrap">
-      <div class="kb-log" id="kbLog"><p class="empty-hint">Choose a spec file and an allowed domain, then hit Start. Progress from the agent — what it navigates to, what it annotates, what it writes — appears here as it happens.</p></div>
+    <div class="kb-main">
+      <div class="kb-new-job-panel" id="kbNewJobPanel">
+        <aside class="kb-rail kb-new-job-form">
+          <h3>Instruction</h3>
+          <textarea id="kbInstructionInput" class="kb-textarea" rows="5" placeholder="e.g. Viết bài KB hướng dẫn bật tính năng X, dùng các tab đã mở bên dưới."></textarea>
+          <p class="empty-hint">Required — tells the agent what article to write. The reference doc below is optional background, not the source of truth.</p>
+
+          <h3>Reference doc <span class="kbd">optional</span></h3>
+          <button id="kbUploadBtn" class="btn sm block">Attach .md file…</button>
+          <p class="kb-filename" id="kbFilename">No file attached.</p>
+
+          <h3>Session tabs</h3>
+          <p class="empty-hint">Open the tabs the agent needs — already logged in, right screen — then add them below. It can only navigate, read, and capture inside these tabs; it can't open new ones on its own.</p>
+          <div class="kb-session-group">
+            <p class="kb-session-label">In session</p>
+            <ul class="kb-session-list" id="kbSessionInList"><li class="empty-hint">None yet — add a tab below.</li></ul>
+          </div>
+          <div class="kb-session-group">
+            <p class="kb-session-label">Open tabs <button id="kbSessionRefresh" class="kb-session-refresh" type="button" title="Refresh open tabs">↻ refresh</button></p>
+            <ul class="kb-session-list" id="kbSessionCandidateList"><li class="empty-hint">Click refresh to list open tabs.</li></ul>
+          </div>
+        </aside>
+        <div class="kb-log-wrap">
+          <div class="kb-log" id="kbLog"><p class="empty-hint">Write an instruction and add at least one session tab, then hit Start. Progress from the agent — what it navigates to, what it annotates, what it writes — appears here as it happens.</p></div>
+        </div>
+      </div>
+      <div class="kb-article-panel" id="kbArticlePanel" hidden>
+        <div class="kb-article-head">
+          <h2 class="kb-article-title" id="kbArticleTitle"></h2>
+          <div class="kb-article-head-actions">
+            <span class="kb-article-savenote" id="kbArticleSaveNote"></span>
+            <button id="kbArticleDelete" class="btn sm danger" type="button" title="Delete this article">🗑 Delete</button>
+            <span class="kb-article-head-divider"></span>
+            <button id="kbCommentModeBtn" class="btn sm" type="button" title="Click a spot on an image to pin a comment">💬 Comment</button>
+            <div class="kb-history-wrap">
+              <button id="kbHistoryBtn" class="btn sm" type="button">🕐 History</button>
+              <div class="kb-history-panel" id="kbHistoryPanel" hidden></div>
+            </div>
+            <button id="kbArticleRefresh" class="btn sm" type="button">↻ Refresh</button>
+            <button id="kbArticleSave" class="btn sm primary" type="button" disabled>Save</button>
+          </div>
+        </div>
+        <div class="kb-article-split">
+          <textarea class="kb-article-editor" id="kbArticleEditor" spellcheck="false"></textarea>
+          <div class="kb-article-preview" id="kbArticlePreview"></div>
+        </div>
+      </div>
     </div>
   </main>
 </div>
@@ -275,6 +319,7 @@
 <script src="lab.js"></script>
 <script src="bridge-editor.js"></script>
 <script src="bridge-kb.js"></script>
+<script src="render-api.js"></script>
 <script src="editor.js"></script>
 </body>
 </html>
