@@ -450,9 +450,12 @@ này — xem "KB Studio UI (Phase 3) — instruction + session tabs..." trong `K
   tham khảo tuỳ chọn**.
 - **Domain allowlist bị bỏ hẳn**, thay bằng **session tabs** — whitelist tabId riêng của Snap
   Studio (`kbSessionTabIds` trong `bridge-worker.js`), UI "In session / Open tabs" trong panel
-  New job. `kb-job.js`'s `canUseTool` giờ khoá theo `tabId` (cả `mcp__chrome__*` lẫn
-  `snap_capture_tab`/`snap_frame_*`), không theo domain nữa; `mcp__chrome__new_tab` bị chặn
-  tuyệt đối.
+  New job (phần UI này KHÔNG đổi). Cách `kb-job.js` dùng whitelist đó bên trong **đã đổi lần
+  nữa** cùng ngày, sau khi job thật đầu tiên cho thấy "đúng tabId đã cho trước" không khả thi
+  (Chrome Bridge luôn cấp một tab group mới, rỗng, mỗi phiên agent — tab thật của người dùng
+  không bao giờ tự vào được đó) — job giờ tự mở tab của chính nó và điều hướng theo **origin**
+  suy ra từ URL các tab trong session, thay vì khoá cứng theo đúng tabId. Xem "Giới hạn trên đã
+  cắn thật — bỏ hẳn 'dùng đúng tab người dùng mở'..." trong `KB-BRIDGE.md` cho chi tiết đầy đủ.
 
 ### Rủi ro
 - **Đây là phase dễ làm sớm nhất và cũng dễ phí công nhất.** Nó là tầng review cho một pipeline

@@ -18,11 +18,15 @@ các luật rút ra từ lỗi đã ship thật.
   Kiểm tra bằng `snap_status` → phải trả `{"connected":true}`.
 - **App đang mở sẵn trong Chrome thật, đã đăng nhập.** Pipeline này cố tình chạy trên profile
   thật (xem `KB-BRIDGE.md` 5.2) — không tự đăng nhập hộ.
-- Nếu là topology B (spawn từ UI KB Studio): **chỉ được đụng tới các tab đã có sẵn trong
-  session** (rail "Session tabs" của UI) — không tự mở tab mới. Mọi `mcp__chrome__*` và
-  `snap_capture_tab`/`snap_frame_*` phải truyền đúng một `tabId` trong session; thiếu `tabId`
-  hoặc dùng `tabId` ngoài session đều bị từ chối. Nếu cần một trang không có trong session,
-  dừng lại và báo rõ cần thêm tab nào — đừng cố `new_tab`.
+- Nếu là topology B (spawn từ UI KB Studio): job **không** có quyền vào tab người dùng đã mở sẵn
+  (mỗi phiên Chrome Bridge luôn có tab group riêng, rỗng). Thay vào đó, gọi
+  `mcp__chrome__navigate` **không kèm `tabId`** để tự mở tab của chính job (cùng profile trình
+  duyệt nên vẫn đăng nhập), điều hướng thẳng tới URL của (các) tab trong session — chỉ được
+  điều hướng trong đúng **origin** của các URL đó, nơi khác bị từ chối. Lấy `tabId` mà `navigate`
+  trả về và dùng đúng giá trị đó cho mọi `snap_capture_tab`/`snap_frame_*`/`snap_add`'s
+  `at.tabId` — các tool này không tự nhận tabId mặc định như `mcp__chrome__*`. `new_tab` luôn bị
+  từ chối — luôn dùng `navigate` kể cả cho trang đầu tiên. Nếu cần một origin không có trong
+  session, dừng lại và báo rõ cần thêm tab nào.
 
 ## Bộ tool
 

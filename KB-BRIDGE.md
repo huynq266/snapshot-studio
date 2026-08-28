@@ -192,12 +192,70 @@ UX ("mở sẵn tab, đưa vào phiên") nhưng không phụ thuộc group nội
   đúng cơ chế đã ghi ở mục 7 gốc, giờ áp dụng cho cả nhánh snap chứ không riêng chrome nữa).
   `allowedTools: []`, mọi quyết định đi qua `canUseTool`.
 
-**Giới hạn đã biết, chưa vá**: whitelist chỉ là danh sách của Snap Studio; nếu một tab **có**
-trong whitelist này nhưng **không** nằm trong tab group nội bộ của Chrome Bridge, lệnh
-`mcp__chrome__*` trên tab đó vẫn bị chính Chrome Bridge từ chối (lỗi rõ ràng, không im lặng)
-— người dùng cần tab đó khả dụng ở cả hai phía. Không tự tạo/gắn Chrome Tab Group thật
-(`chrome.tabGroups`) để đồng bộ hai bên — cân nhắc thêm quyền + độ phức tạp so với lợi ích,
-để dành nếu sau này thấy cần.
+**Giới hạn đã biết ở đây — sau này đổi hẳn cách tiếp cận, xem mục ngay dưới**: whitelist chỉ là
+danh sách của Snap Studio; nếu một tab **có** trong whitelist này nhưng **không** nằm trong tab
+group nội bộ của Chrome Bridge, lệnh `mcp__chrome__*` trên tab đó vẫn bị chính Chrome Bridge từ
+chối (lỗi rõ ràng, không im lặng) — người dùng cần tab đó khả dụng ở cả hai phía.
+
+### Giới hạn trên đã cắn thật — bỏ hẳn "dùng đúng tab người dùng mở", để agent tự mở tab (2026-08-28)
+
+Chạy job KB thật đầu tiên (bài "Variant swatches") thì dính đúng giới hạn vừa ghi ở trên: tab
+người dùng thêm vào session **có** trong whitelist Snap Studio nhưng job mới lại luôn được Chrome
+Bridge gán một **tab group MỚI, rỗng** (`"Claude · f7b7"`, khác group của phiên tôi lúc đó, khác
+group của lần chạy trước) — tab thật của người dùng không bao giờ tự nằm trong group đó, nên mọi
+`mcp__chrome__*` bị chính Chrome Bridge từ chối ngay bước đầu. Xác nhận qua `kb_query` (WS thật):
+job đã **kết thúc hẳn** (`status: "error"`) chứ không phải đang treo chờ — dòng "please drag the
+tab... let me know" chỉ là câu chốt cuối cùng của agent trước khi phiên kết thúc.
+
+Vì group luôn mới theo từng phiên agent (khác `chrome.tabGroups` thật — không có cách nào Snap
+Studio tự gắn tab CÓ SẴN của người dùng vào một group agent chưa tồn tại tại thời điểm người dùng
+bấm Start), yêu cầu "chỉ dùng đúng tab đã mở sẵn" **về cấu trúc là không khả thi** — người dùng
+không thể biết trước tên group để kéo tab vào, và group cũ (nếu có) không tái dùng được cho lần
+chạy sau.
+
+**Quyết định (người dùng chọn qua 3 phương án được đề xuất)**: bỏ hẳn ràng buộc "phải đúng tabId
+đã cho trước" — để job **tự mở tab của chính nó** (`mcp__chrome__navigate` không kèm `tabId`, tự
+động mở/dùng tab trong group riêng của chính phiên đó — không xung đột group nữa) và điều hướng
+thẳng tới URL của (các) tab người dùng đã thêm vào session. Cùng profile trình duyệt nên cookie/
+đăng nhập vẫn còn — chỉ mất trạng thái cuộn/click tay người dùng đã làm trước khi thêm tab, việc
+đó chuyển sang cho instruction mô tả bù. Điều hướng bị khoá theo **origin** (protocol+host) suy ra
+từ chính URL của các tab đã thêm — không phải domain gõ tay lại (đó là đúng nhược điểm khiến domain
+allowlist bị bỏ lần trước — "hạn chế mở tab để navigate" — lần này origin tự suy ra, không cần
+người dùng nhập gì thêm, và chỉ áp cho `navigate`, không áp cho các thao tác khác trong cùng tab).
+
+`snap-bridge/kb-job.js` đổi ba chỗ:
+
+- `canUseTool`: `mcp__chrome__new_tab` vẫn bị chặn (không đổi lý do bảo mật gì — thuần vì
+  `navigate` không kèm `tabId` đã tự làm việc "mở nếu chưa có" rồi, chặn `new_tab` giữ job chỉ có
+  đúng MỘT tab dễ đoán). `mcp__chrome__navigate` được cho qua NẾU `url` nằm trong origin cho phép
+  (không có `url` — tức action `back`/`forward`/`reload` — luôn cho qua, vì không tạo đích mới).
+  Mọi `mcp__chrome__*` tên hợp lệ khác (click/fill/scroll/...) cho qua **không cần soát `tabId`
+  nữa** — biên đó giờ do chính group nội bộ của Chrome Bridge lo (job không còn cách nào biết một
+  `tabId` nằm ngoài group của chính nó, vì nó không còn được cho biết tabId thật của người dùng
+  nữa).
+- **`mcp__snap__*` thì khác** — các tool này gọi thẳng `chrome.tabs.*` trong `background.js`,
+  **không** đi qua ranh giới group của Chrome Bridge, nên vẫn cần tự soát `tabId` phía
+  `canUseTool`. Cái khó: `tabId` thật giờ chỉ biết được lúc chạy (Chrome Bridge tự gán), không biết
+  trước — mà `canUseTool` chỉ thấy **input** của lệnh gọi tool, không thấy **kết quả**. Vá bằng
+  cách đọc `tool_result` ngay trong vòng lặp message của `runJob()` (message `type: "user"` mang
+  `tool_result`, khớp lại `tool_use_id` với lệnh `navigate` vừa gọi) để tự học `currentTabId`, rồi
+  `canUseTool` so khớp mọi `snap_capture_tab`/`snap_frame_*`/`snap_add`'s `at.tabId` với đúng giá
+  trị đó — không phải với một danh sách tabId biết trước nữa. `extractTabId()` (mới) đọc số
+  `tabId` từ nội dung `tool_result` — thử `JSON.parse` trước, rơi về regex nếu không phải JSON
+  thuần (hình dạng kết quả thật của Chrome Bridge không có tài liệu, nên không giả định cứng một
+  dạng).
+- **Đã test logic bằng harness riêng** (copy nguyên `canUseTool`/`extractTabId` ra khỏi
+  `runJob()` — không export được vì kéo theo `query()` thật — chạy 27 assertion độc lập, không
+  gọi Claude Agent SDK thật): `new_tab` luôn bị chặn; `navigate` trong origin được, ngoài origin
+  bị chặn, không kèm `url` (back/forward/reload) được; mọi `mcp__chrome__*` khác không cần `tabId`
+  vẫn được; `snap_capture_tab`/`snap_frame_*` bị chặn khi chưa có `currentTabId`, được khi khớp,
+  bị chặn khi KHÔNG khớp (chặn được cả trường hợp đoán/dùng nhầm tabId khác); `snap_add` không
+  `at` (toạ độ x/y thường) không cần soát gì, có `at.tabId` thì soát như các tool kia; các tool bị
+  loại theo tên (PII: `get_page_text`, `read_page`, `javascript_eval`, `upload_file`, ...) vẫn bị
+  chặn, không đổi. Test session tabs nhiều origin khác nhau — cả hai origin được, origin thứ ba lạ
+  vẫn bị chặn. **Chưa test bằng một phiên agent thật** (tốn phí, cần trang thật) — logic đã kiểm
+  chứng độc lập nhưng hành vi thật của `query()`/format `tool_result` thật của Chrome Bridge thì
+  chưa chạy qua.
 
 ### Ảnh chụp bị ám vàng/cam — xác nhận không phải Chrome Bridge, không phải Night Light, nguồn thật chưa chốt (2026-08-28)
 
