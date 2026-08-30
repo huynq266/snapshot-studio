@@ -14,7 +14,15 @@
 
   function init(deps) {
     if (!hasExt) return;
-    const { getCapture, loadCapture, loadImage, newElement, render, select, getView, setView, toast } = deps;
+    // getAgent resolves the KB tab's agent canvas LAZILY — editor.js wires this
+    // module before SnapKit.kb.init() has run, so there is nothing to hold onto
+    // at wiring time, only at command time.
+    const { getAgent, setView } = deps;
+    function agent() {
+      const a = getAgent();
+      if (!a) throw new Error('the KB tab has not finished loading — retry in a moment.');
+      return a;
+    }
 
     function reply(reqId, ok, dataOrError) {
       const payload = ok
@@ -23,32 +31,30 @@
       chrome.runtime.sendMessage(payload, () => void chrome.runtime.lastError);
     }
 
+    /** snap_open. Lands on the KB tab's AGENT CANVAS, not the Snap tab's own —
+     *  a job used to leave one capture tab per step in the user's workspace and
+     *  rewrite their saved session on every element it added. See mountAgent()
+     *  in kb-surface.js.
+     *
+     *  The view is only moved when nobody is looking. A human on this tab is
+     *  deliberately on the view they are on — an article, the Library, the Lab
+     *  — and yanking it on every screenshot the agent loads is the complaint
+     *  this rule exists for. document.hidden is the test because the tab is no
+     *  longer pulled to the front to receive these commands at all (see
+     *  relayToEditor in bridge-worker.js): when it is hidden there is no view to
+     *  protect, and KB is where the work now is. */
     async function cmdOpen({ dataUrl, url }) {
-      // Not when the KB tab (topology B) is the current view: a human watching that
-      // tab's job log is deliberately there, and a spawned agent's own snap_open
-      // calls would otherwise yank their view to Snap on every screenshot it loads.
-      if (getView() !== 'kb') setView('snap');
-      await loadCapture({ id: 'bridge_' + Math.random().toString(36).slice(2, 8), dataUrl, url: url || '', rect: null, note: 'Loaded by snap-bridge.' });
-      const c = getCapture();
-      return { width: c.img.w, height: c.img.h };
+      if (document.hidden) setView('kb');
+      return agent().open({ dataUrl, url: url || '' });
     }
 
-    // Mirrors editor.js's own addElement() — capture.els.push(el); select(el.id) —
-    // rather than that function's full palette behavior: it special-cases 'arrow'
-    // into an interactive click-drag placement, which has no meaning for a caller
-    // with no mouse. arrow.defaults() already places a sensible two-point arrow
-    // near the image center, so it goes through the same plain path as every
-    // other type; a caller that wants specific endpoints overrides x1/y1/x2/y2
-    // via props.
+    // No draw-to-place: editor.js's addElement() special-cases 'arrow' into an
+    // interactive click-drag, which has no meaning for a caller with no mouse.
+    // arrow.defaults() already places a sensible two-point arrow near the image
+    // centre, so every type goes through the same plain path; a caller that
+    // wants specific endpoints overrides x1/y1/x2/y2 via props.
     function cmdAdd({ type, props }) {
-      const capture = getCapture();
-      if (!capture) throw new Error('no capture is open — call snap_open first');
-      const el = newElement(type);
-      if (!el) throw new Error(`unknown component type "${type}"`);
-      Object.assign(el, props || {});
-      capture.els.push(el);
-      select(el.id);
-      toast(`snap-bridge added ${type}.`);
+      const el = agent().add(type, props);
       // Every component positions itself with x/y — except arrow, the one type with
       // two endpoints instead of a single anchor (x1/y1/x2/y2, no x/y at all).
       const pos = el.type === 'arrow' ? { x1: el.x1, y1: el.y1, x2: el.x2, y2: el.y2 } : { x: el.x, y: el.y };
@@ -58,38 +64,21 @@
     /** The annotation list as it stands right now, for snap-bridge's headless
      *  renderer (snap-bridge/render.mjs) to reproduce without going through
      *  captureVisibleTab — which is what caps the old export path at the
-     *  window's own size. Returns a structured clone so a later edit in this
-     *  tab cannot mutate what the renderer already received. */
+     *  window's own size. This reads the agent canvas, so anything the user
+     *  corrected there by hand before the export is included, exactly as it was
+     *  when this read the Snap tab. */
     function cmdGetEls() {
-      const capture = getCapture();
-      if (!capture) throw new Error('no capture is open — call snap_open first');
-      return { els: JSON.parse(JSON.stringify(capture.els)), width: capture.img.w, height: capture.img.h };
+      return agent().getEls();
     }
 
-    // Maximizing first is what makes `strict` meaningful: renderToPngDataUrl() measures
-    // the window as it finds it, and a caller with no toast to read needs the window
-    // actually big enough, not just an error explaining that it was not.
-    async function maximizeWindow() {
-      try {
-        const win = await chrome.windows.getCurrent();
-        if (win && win.state !== 'maximized') {
-          await chrome.windows.update(win.id, { state: 'maximized' });
-          await new Promise((r) => setTimeout(r, 250)); // let the resize actually paint
-        }
-      } catch (e) { /* best-effort — renderToPngDataUrl's own strict check still catches a too-small window */ }
-    }
-
+    /** The old visual export: captureVisibleTab on this tab's own Snap stage,
+     *  capped at the window's size. Nothing in snap-bridge has called it since
+     *  snap_export started rendering headless off get_els (server.js), and now
+     *  that the agent draws in the KB tab it has no canvas to shoot — the Snap
+     *  stage holds the USER's capture, so exporting it here would silently ship
+     *  the wrong picture. Refuse loudly instead of guessing. */
     async function cmdExport() {
-      const capture = getCapture();
-      if (!capture) throw new Error('no capture is open — call snap_open first');
-      await maximizeWindow();
-      const dataUrl = await window.SnapKit.export.renderToPngDataUrl({ strict: true });
-      // The rendered PNG's own pixel size, not capture.img.w/h — export runs at
-      // whatever CSS-px-to-device-px ratio this window has, which is not guaranteed
-      // to match the source capture's, even for a full, uncropped frame.
-      const img = await loadImage(dataUrl);
-      toast('snap-bridge exported the capture.');
-      return { dataUrl, width: img.naturalWidth, height: img.naturalHeight };
+      throw new Error('the visual export path is gone: a KB job\'s canvas is in the KB tab, not on the Snap stage. Use snap_export, which renders headless from get_els.');
     }
 
     chrome.runtime.onMessage.addListener((msg) => {

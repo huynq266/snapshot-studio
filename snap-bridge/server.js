@@ -6,7 +6,7 @@
    to disk. This process is Snap Studio's own way out to Claude Code —
    an MCP HTTP server on one side, a WebSocket server the extension
    service worker connects into on the other. */
-import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync, unlinkSync, rmSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync, unlinkSync, rmSync, openSync, readSync, closeSync } from "node:fs";
 import { randomBytes, randomUUID } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,7 +16,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import { loadChromeBridgeConfig } from "./chrome-bridge-config.js";
-import { startJob, cancelJob, getCurrentJob } from "./kb-job.js";
+import { startJob, cancelJob, getCurrentJob, getReviseSession, resetReviseSession, noteJobSlug } from "./kb-job.js";
 import { renderSteps } from "./render.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -101,9 +101,10 @@ wss.on("connection", (ws, req) => {
     // an unambiguous way to multiplex both directions over one connection.
     if (msg.cmd === "kb_start" || msg.cmd === "kb_cancel" || msg.cmd === "kb_query"
       || msg.cmd === "kb_list" || msg.cmd === "kb_read" || msg.cmd === "kb_save_md" || msg.cmd === "kb_read_image"
-      || msg.cmd === "kb_delete"
+      || msg.cmd === "kb_job_save" || msg.cmd === "kb_delete"
       || msg.cmd === "kb_comments_list" || msg.cmd === "kb_comments_add"
       || msg.cmd === "kb_comments_resolve" || msg.cmd === "kb_comments_delete"
+      || msg.cmd === "kb_session"
       || msg.cmd === "kb_history_list" || msg.cmd === "kb_history_read" || msg.cmd === "kb_history_restore") handleKbCommand(ws, msg);
   });
   ws.on("close", () => {
@@ -124,6 +125,45 @@ function pushKbProgress(line) {
   try { wsClient.send(JSON.stringify({ type: "kb_progress", line })); } catch {}
 }
 
+/** Something under kb/ just changed on disk, written by an agent rather than by
+ *  KB Studio itself. KB Studio draws each step image live from job.json (see
+ *  src/kb-surface.js), so this is what makes an agent moving a callout show up
+ *  on the user's screen while the job is still running, instead of after it.
+ *
+ *  slug null means "something under kb/, and the writer could not say which
+ *  article" — snap_export writes a bare path with no article attached to it.
+ *  The UI treats that as "re-read whatever is open". */
+function pushKbArticleChanged(slug, source) {
+  noteJobSlug(slug);          // before the early return: the job's slug matters even with no UI attached
+  if (!wsClient || wsClient.readyState !== 1) return;
+  try { wsClient.send(JSON.stringify({ type: "kb_article_changed", slug: slug || null, source: source || null })); } catch {}
+}
+/** kb/<slug>/job.json or kb/<slug>.md -> "<slug>". Anything else -> null.
+ *
+ *  "Anything else" has to include a path whose first segment merely LOOKS like a
+ *  slug. snap_export writes bare image paths and every article this tool makes
+ *  puts them in kb/img/, so "img/01-x-annotated.png" used to answer "img" — an
+ *  article that does not exist. Two things then went wrong on a real job: the KB
+ *  tab adopted "img" for its preview and could only fail to read it, and
+ *  noteJobSlug() stamped "img" onto the running job for good, so reloading the
+ *  page mid-job came back pointed at nothing. Only answer with a slug that has
+ *  an article behind it; a bare path deserves the null that snap_export's own
+ *  comment already promised. */
+function slugFromKbRel(rel) {
+  const parts = String(rel || "").split(/[\\/]/).filter(Boolean);
+  const cand = parts.length > 1
+    ? parts[0]
+    : (parts.length === 1 && /\.md$/i.test(parts[0]) ? parts[0].replace(/\.md$/i, "") : null);
+  if (!cand) return null;
+  try {
+    if (existsSync(resolveOut(`${cand}.md`))) return cand;
+    if (existsSync(resolveOut(path.join(cand, "job.json")))) return cand;
+  } catch {
+    // resolveOut refuses anything that would escape kb/ — not a slug either way.
+  }
+  return null;
+}
+
 function handleKbCommand(ws, msg) {
   const { reqId, cmd, args } = msg;
   const reply = (ok, dataOrError) => {
@@ -132,7 +172,16 @@ function handleKbCommand(ws, msg) {
   };
   try {
     if (cmd === "kb_start") {
+      // A revise job is started from an article panel, so its context is
+      // assembled HERE rather than shipped up from the UI and back down: this
+      // process already has the article and its pins on disk. Doing it before
+      // startJob() also means an unknown slug fails as a plain error in the
+      // UI, instead of spawning an agent that then discovers it has nothing
+      // to work on.
       const { id } = startJob({
+        mode: args.mode,
+        slug: args.slug,
+        context: args.mode === "revise" ? reviseContext(args.slug) : null,
         instruction: args.instruction,
         markdown: args.markdown,
         mdFilename: args.mdFilename,
@@ -146,12 +195,23 @@ function handleKbCommand(ws, msg) {
       reply(true, {});
     } else if (cmd === "kb_query") {
       reply(true, { job: getCurrentJob() });
+    } else if (cmd === "kb_session") {
+      // Read the article's conversation state, or drop it ("New session").
+      // Reset is the same call so the UI gets the fresh state back in one round
+      // trip and cannot show a stale badge.
+      if (args.reset) resetReviseSession(args.slug);
+      reply(true, getReviseSession(args.slug));
     } else if (cmd === "kb_list") {
       reply(true, listKbArticles());
     } else if (cmd === "kb_read") {
       reply(true, readKbArticle(args.slug));
     } else if (cmd === "kb_save_md") {
       reply(true, saveKbMarkdown(args.slug, args.md));
+    } else if (cmd === "kb_job_save") {
+      // The only async KB command: it re-renders the PNGs for the steps whose
+      // annotations moved, which is a headless browser round trip. Everything
+      // else here answers straight off the filesystem.
+      saveKbJob(args.slug, args.job, args.rerenderSteps).then((d) => reply(true, d), (e) => reply(false, e));
     } else if (cmd === "kb_read_image") {
       reply(true, readKbImage(args.relPath));
     } else if (cmd === "kb_delete") {
@@ -206,13 +266,26 @@ function jobMdRel(slug, job) {
 function listKbArticles() {
   const entries = readdirSync(OUT_ROOT, { withFileTypes: true });
   const items = [];
+  /** A flat "<slug>.md" and a "<slug>/job.json" beside it are ONE article —
+   *  readKbArticle() opens a single thing for that slug and now returns both
+   *  halves of it. Two rail rows for it were two doors into the same file, one
+   *  of which quietly did nothing different. Merge them: the job's step/image
+   *  counts, the newer of the two timestamps, the kind readKbArticle actually
+   *  reports. */
+  const push = (item) => {
+    const prev = items.find((x) => x.slug === item.slug);
+    if (!prev) { items.push(item); return; }
+    if (item.steps != null) { prev.steps = item.steps; prev.imgs = item.imgs; }
+    if (item.kind === "file") prev.kind = "file";       // what readKbArticle opens
+    prev.updatedAt = Math.max(prev.updatedAt, item.updatedAt);
+  };
   for (const ent of entries) {
     if (ent.isFile() && ent.name.toLowerCase().endsWith(".md")) {
       const abs = resolveOut(ent.name);
       const slug = ent.name.slice(0, -3);
       let title = slug;
       try { title = firstHeading(readFileSync(abs, "utf8")) || slug; } catch {}
-      items.push({ slug, kind: "file", title, mdRel: toKbRel(abs), updatedAt: statSync(abs).mtimeMs });
+      push({ slug, kind: "file", title, mdRel: toKbRel(abs), updatedAt: statSync(abs).mtimeMs });
     } else if (ent.isDirectory()) {
       let jobAbs;
       try { jobAbs = resolveOut(path.join(ent.name, "job.json")); } catch { continue; }
@@ -220,7 +293,7 @@ function listKbArticles() {
       let job;
       try { job = JSON.parse(readFileSync(jobAbs, "utf8")); } catch { continue; }
       const mdAbs = resolveOut(jobMdRel(ent.name, job));
-      items.push({
+      push({
         slug: ent.name, kind: "job", title: job.title || ent.name,
         mdRel: toKbRel(mdAbs), updatedAt: statSync(jobAbs).mtimeMs,
         steps: Array.isArray(job.steps) ? job.steps.length : 0,
@@ -232,11 +305,51 @@ function listKbArticles() {
   return { items };
 }
 
+/** An el is {type, props}, and getting that wrong fails SILENTLY rather than
+ *  loudly: render.mjs passes `props: el.props || {}` and render.add() does
+ *  Object.assign(el, {}), so a flat {type, x, y, w, h} renders every annotation
+ *  at its component's DEFAULT position — a label reading "Label" in the middle
+ *  of the picture instead of the text and coordinates just worked out. KB
+ *  Studio's live surfaces read el.props the same way, so the preview agrees
+ *  with the PNG and neither of them says why. A real job spent two full render
+ *  passes discovering that. Say it at the write instead. */
+function assertElShapes(job) {
+  for (const [i, s] of job.steps.entries()) {
+    const n = (s && s.n != null) ? s.n : i + 1;
+    for (const el of (s && s.els) || []) {
+      if (!el || typeof el !== "object" || Array.isArray(el) || !el.type) {
+        throw new Error(`step ${n}: every el needs a "type" — got ${JSON.stringify(el)}`);
+      }
+      // {type} alone is legitimate: a component with nothing overridden.
+      const strays = Object.keys(el).filter((k) => k !== "type" && k !== "props");
+      if (strays.length) {
+        const fixed = { type: el.type, props: Object.fromEntries(strays.map((k) => [k, el[k]])) };
+        throw new Error(
+          `step ${n}: els must be [{ type, props: { ... } }] — this one puts ${strays.join(", ")} at the top level, `
+          + `which renders it at the component's default position instead of yours. Write it as ${JSON.stringify(fixed)}`);
+      }
+    }
+  }
+}
+
+/** The job file for an article, or null. Kept separate from readKbArticle's
+ *  own kind because the two are NOT the same question: an article can be flat
+ *  on disk (kb/<slug>.md is what gets read and written) and still be GENERATED
+ *  from kb/<slug>/job.json — the first articles this tool made are exactly that
+ *  shape. Answering "no job" for those meant KB Studio never saw their
+ *  annotations, so its step images could only ever be flat PNGs. */
+function readKbJob(slug) {
+  const jobAbs = resolveOut(path.join(slug, "job.json"));
+  if (!existsSync(jobAbs)) return null;
+  try { return JSON.parse(readFileSync(jobAbs, "utf8")); } catch { return null; }
+}
+
 function readKbArticle(slug) {
   if (typeof slug !== "string" || !slug) throw new Error("slug is required");
   const flatAbs = resolveOut(`${slug}.md`);
   if (existsSync(flatAbs)) {
-    return { kind: "file", slug, md: readFileSync(flatAbs, "utf8"), mdRel: toKbRel(flatAbs) };
+    const job = readKbJob(slug);
+    return { kind: "file", slug, md: readFileSync(flatAbs, "utf8"), mdRel: toKbRel(flatAbs), ...(job ? { job } : {}) };
   }
   const jobAbs = resolveOut(path.join(slug, "job.json"));
   if (existsSync(jobAbs)) {
@@ -323,7 +436,48 @@ function saveKbMarkdown(slug, md) {
   throw new Error(`no article "${slug}" found in kb/ to save into`);
 }
 
-/** Deletes an article outright — flat-file kind removes the .md plus its
+/** KB Studio's own write-back for annotations: the user dragged a callout on a
+ *  live step surface and hit Save. Deliberately NOT the same call as
+ *  snap_render_job:
+ *
+ *    - only the steps whose annotations actually moved are re-rendered. The
+ *      rest already match their job.json and re-rendering them is seconds of
+ *      headless browser for a byte-identical PNG.
+ *    - the markdown is NOT re-assembled. Moving an element changes neither the
+ *      prose nor the file an image is written to, and assembleMarkdown() would
+ *      overwrite whatever the user has typed into the article by hand — which
+ *      is the other half of the same Save button.
+ *
+ *  One level of undo, same as snap_job: overwriting job.json discards
+ *  coordinates that took a browser session to produce, so the previous version
+ *  is always kept beside it. */
+async function saveKbJob(slug, job, rerenderSteps) {
+  if (typeof slug !== "string" || !slug) throw new Error("slug is required");
+  if (!job || !Array.isArray(job.steps) || !job.steps.length) {
+    throw new Error("job.steps[] is required and must not be empty — writing a job with no steps would throw away every annotation in the article.");
+  }
+  const abs = resolveOut(path.join(slug, "job.json"));
+  if (!existsSync(abs)) throw new Error(`no job.json for "${slug}" (${toKbRel(abs)} does not exist) — nothing to save annotations into.`);
+  writeFileSync(resolveOut(path.join(slug, "job.prev.json")), readFileSync(abs, "utf8"), "utf8");
+  writeFileSync(abs, JSON.stringify(job, null, 2), "utf8");
+
+  const wanted = Array.isArray(rerenderSteps) && rerenderSteps.length ? new Set(rerenderSteps.map(Number)) : null;
+  const steps = job.steps
+    .map((s, i) => ({ s, n: s.n == null ? i + 1 : s.n }))
+    .filter(({ s, n }) => s && s.src && s.out && (!wanted || wanted.has(n)))
+    .map(({ s }) => ({ srcAbs: resolveOut(s.src), outAbs: resolveOut(s.out), els: s.els || [] }));
+
+  let rendered = [];
+  let warn = null;
+  if (steps.length) {
+    const acc = await accentForRender();
+    warn = acc.warn || null;
+    rendered = await renderSteps(steps, { scale: 1, accent: acc.accent });
+  }
+  return { savedRel: toKbRel(abs), rendered: rendered.map((r) => toKbRel(r.out)), warn };
+}
+
+/** Deletes an article outright — flat-file kind removes the .md plus its/** Deletes an article outright — flat-file kind removes the .md plus its
  *  sibling comments/history files (same naming commentsPath()/historyDir()
  *  use); job kind removes the whole "<slug>/" directory (job.json, article
  *  md, images, comments.json, history/ — all of it, since it's the job's
@@ -399,12 +553,25 @@ function addKbComment(slug, { img, xNorm, yNorm, text }) {
   writeFileSync(p, JSON.stringify(list, null, 2), "utf8");
   return { comment };
 }
-function setKbCommentResolved(slug, id, resolved) {
+function setKbCommentResolved(slug, id, resolved, meta = {}) {
   const p = commentsPath(slug);
   const list = readCommentsFile(p);
   const c = list.find((x) => x.id === id);
   if (!c) throw new Error(`no comment with id "${id}"`);
   c.resolved = !!resolved;
+  // Who closed it and why. The UI's own Resolve button passes neither and
+  // reads exactly as it did before; an agent resolving a pin must say what it
+  // changed, because that line is what the human sees on the pin when they
+  // come back — the difference between a loop that closed and a pin that just
+  // went quiet. Reopening clears all three: they describe a fix the reopen is
+  // disputing.
+  if (c.resolved) {
+    c.resolvedAt = Date.now();
+    c.resolvedBy = meta.by || "human";
+    if (meta.note) c.resolvedNote = meta.note;
+  } else {
+    delete c.resolvedAt; delete c.resolvedBy; delete c.resolvedNote;
+  }
   writeFileSync(p, JSON.stringify(list, null, 2), "utf8");
   return { comment: c };
 }
@@ -418,7 +585,171 @@ function deleteKbComment(slug, id) {
 }
 
 // ---------------------------------------------------------------------------
-// MCP tools — seven, each a thin wrapper over an RPC to the extension plus
+// Comments, as an AGENT needs them (snap_comments / snap_comment_resolve
+// below). A human pins feedback at a spot on a RENDERED image in normalized
+// coordinates; everything that can act on that feedback — snap_add's props,
+// job.json's els — speaks PIXELS in the base capture's own coordinate space.
+// So this is the translation layer: pin -> (x, y) in capture pixels, which
+// job step owns that image, and which annotations already sit nearest the
+// pin. Handing an agent a bare "0.42, 0.71 of some file" would leave it
+// guessing at coordinates, which is the one thing PLACEMENT_PLAYBOOK #0
+// exists to stop.
+// ---------------------------------------------------------------------------
+
+/** Width/height straight out of a PNG's IHDR chunk: 8-byte signature, 4-byte
+ *  length, 4-byte "IHDR", then two big-endian uint32s. 24 bytes off the front
+ *  rather than a decoder dependency — or slurping a multi-MB screenshot into
+ *  memory just to divide by its width. */
+function pngSize(abs) {
+  const fd = openSync(abs, "r");
+  try {
+    const head = Buffer.alloc(24);
+    if (readSync(fd, head, 0, 24, 0) < 24) throw new Error(`${toKbRel(abs)} is too short to be a PNG`);
+    if (head.toString("ascii", 12, 16) !== "IHDR") throw new Error(`${toKbRel(abs)} is not a PNG`);
+    return { w: head.readUInt32BE(16), h: head.readUInt32BE(20) };
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** Where an annotation "is", for the only question asked of it here: which
+ *  existing element is this pin about? Mirrors geometryFor()'s per-type x/y
+ *  semantics from the other direction — zoom's x/y is ALREADY its centre,
+ *  arrow has two endpoints and no single anchor, everything else is a
+ *  top-left corner with a box hanging off it. */
+function elCentre(el) {
+  const p = (el && el.props) || {};
+  if (el.type === "arrow") {
+    if (![p.x1, p.y1, p.x2, p.y2].every((n) => typeof n === "number")) return null;
+    return { x: Math.round((p.x1 + p.x2) / 2), y: Math.round((p.y1 + p.y2) / 2) };
+  }
+  if (typeof p.x !== "number" || typeof p.y !== "number") return null;
+  if (el.type === "zoom") return { x: p.x, y: p.y };
+  return { x: Math.round(p.x + (p.w || 0) / 2), y: Math.round(p.y + (p.h || 0) / 2) };
+}
+
+const NEAREST_ELS = 3;
+
+/** One article's pins, each turned into something an agent can act on.
+ *  `img` in comments.json is the src string the MARKDOWN uses, so it
+ *  resolves against the .md's own directory (that is what assembleMarkdown
+ *  wrote), never against kb/ — the same lockstep noted on commentsPath(). */
+function describeKbComments(slug, { includeResolved = false } = {}) {
+  const art = readKbArticle(slug);          // throws on an unknown slug
+  const mdAbs = art.kind === "job" ? resolveOut(jobMdRel(slug, art.job)) : resolveOut(`${slug}.md`);
+  const steps = art.kind === "job" && Array.isArray(art.job.steps) ? art.job.steps : [];
+  const all = readCommentsFile(commentsPath(slug));
+
+  const comments = (includeResolved ? all : all.filter((c) => !c.resolved)).map((c) => {
+    const out = {
+      id: c.id,
+      text: c.text,
+      resolved: !!c.resolved,
+      createdAt: new Date(c.createdAt).toISOString(),
+      img: c.img,
+      at: { xNorm: c.xNorm, yNorm: c.yNorm },
+    };
+    if (c.resolvedNote) out.resolvedNote = c.resolvedNote;
+
+    let imgAbs;
+    try {
+      imgAbs = resolveOut(path.relative(OUT_ROOT, path.resolve(path.dirname(mdAbs), c.img)));
+    } catch {
+      out.note = `"${c.img}" does not resolve to a file under kb/ — no pixel coordinates for this pin.`;
+      return out;
+    }
+
+    const idx = steps.findIndex((s) => s && s.out && resolveOut(s.out) === imgAbs);
+    const step = idx === -1 ? null : steps[idx];
+
+    // The pin sits on the RENDERED image; every fix is written in the BASE
+    // capture's coordinates (that is the space els use). Normalizing per axis
+    // is what makes that safe: the render can be a different size than its
+    // base — `scale`, or the older export-the-editor-tab path these first
+    // articles were built with — and xNorm/yNorm still land in the right
+    // place. Sizes are reported when they differ rather than warned about,
+    // since differing is normal here; what a size CANNOT reveal is a base
+    // re-captured since the render, so leave that judgement to the caller.
+    try {
+      const rendered = pngSize(imgAbs);
+      const baseAbs = step && step.src && existsSync(resolveOut(step.src)) ? resolveOut(step.src) : imgAbs;
+      const base = baseAbs === imgAbs ? rendered : pngSize(baseAbs);
+      out.at.x = Math.round(c.xNorm * base.w);
+      out.at.y = Math.round(c.yNorm * base.h);
+      out.at.space = { base: toKbRel(baseAbs), w: base.w, h: base.h };
+      if (rendered.w !== base.w || rendered.h !== base.h) {
+        out.at.space.pinnedOn = { img: toKbRel(imgAbs), w: rendered.w, h: rendered.h };
+      }
+    } catch (e) {
+      out.note = `could not read the image size (${e.message}) — normalized coordinates only.`;
+    }
+
+    if (step) {
+      out.step = {
+        n: step.n == null ? idx + 1 : step.n,
+        heading: step.heading || null,
+        src: step.src,
+        out: step.out,
+        job: toKbRel(resolveOut(path.join(slug, "job.json"))),
+      };
+      // What to edit, not just where: the elements closest to the pin, with
+      // their props, since a pin nearly always means "this one is wrong".
+      if (typeof out.at.x === "number") {
+        out.nearestEls = (step.els || [])
+          .map((el, i) => {
+            const centre = elCentre(el);
+            return {
+              index: i, type: el.type, centre,
+              distPx: centre ? Math.round(Math.hypot(centre.x - out.at.x, centre.y - out.at.y)) : null,
+              props: el.props || {},
+            };
+          })
+          .sort((a, b) => (a.distPx == null ? Infinity : a.distPx) - (b.distPx == null ? Infinity : b.distPx))
+          .slice(0, NEAREST_ELS);
+      }
+    }
+    return out;
+  });
+
+  return {
+    slug,
+    kind: art.kind,
+    md: toKbRel(mdAbs),
+    commentsFile: toKbRel(commentsPath(slug)),
+    open: all.filter((c) => !c.resolved).length,
+    resolved: all.filter((c) => c.resolved).length,
+    comments,
+  };
+}
+
+/** Everything a revise job needs handed to it up front: the article as it
+ *  stands, and the open pins already resolved to real pixels. It can re-read
+ *  both through snap_comments / snap_job, but starting with them in the
+ *  prompt is what makes a one-line instruction ("fix the pins") land. */
+function reviseContext(slug) {
+  const art = readKbArticle(slug);      // throws for an unknown slug
+  return { slug, kind: art.kind, mdRel: art.mdRel, md: art.md, comments: describeKbComments(slug, {}) };
+}
+
+/** No slug given: which articles have feedback waiting. Scanning every
+ *  article is cheap, and "is there anything for me to fix?" should not
+ *  require already knowing the slug. */
+function listKbCommentCounts() {
+  const articles = [];
+  for (const a of listKbArticles().items) {
+    const all = readCommentsFile(commentsPath(a.slug));
+    if (!all.length) continue;
+    articles.push({
+      slug: a.slug, kind: a.kind, title: a.title,
+      open: all.filter((c) => !c.resolved).length,
+      resolved: all.filter((c) => c.resolved).length,
+    });
+  }
+  return { articles };
+}
+
+// ---------------------------------------------------------------------------
+// MCP tools — seventeen, most a thin wrapper over an RPC to the extension plus
 // (for the ones that produce a file) a write to disk. See KB-BRIDGE.md
 // section 2 for what each maps to in src/ (snap_write_kb is mục 7 — it has
 // no extension RPC at all, it only writes straight to kb/).
@@ -651,6 +982,7 @@ function buildMcpServer() {
     // re-render overwrites it, same as saveKbMarkdown's own manual-edit path.
     if (existsSync(mdAbs)) snapshotKbHistory(path.dirname(rel), readFileSync(mdAbs, "utf8"));
     writeFileSync(mdAbs, assembleMarkdown(job, mdAbs), "utf8");
+    pushKbArticleChanged(job.slug || slugFromKbRel(rel), "snap_render_job");
 
     return text([
       `Re-rendered ${rendered.length} image(s) from ${toKbRel(jobAbs)}:`,
@@ -661,7 +993,7 @@ function buildMcpServer() {
   });
 
   mcp.registerTool("snap_write_kb", {
-    description: "Write the final KB article markdown to a file under kb/. Refuses to overwrite an existing file unless overwrite is true — call this once, after every screenshot/annotation step for the article is done.",
+    description: "Write the final KB article markdown to a file under kb/. Refuses to overwrite an existing file unless overwrite is true — call this once, after every screenshot/annotation step for the article is done. An overwrite snapshots the previous version into the article's history first, so a rewrite is always recoverable from KB Studio's History panel.",
     inputSchema: {
       path: z.string().describe("Output path relative to kb/, must end in .md, e.g. \"my-feature.md\""),
       content: z.string().describe("Full markdown content of the KB article, including any ![](img/...) references to files written by snap_export"),
@@ -673,9 +1005,146 @@ function buildMcpServer() {
     if (existsSync(abs) && !overwrite) {
       throw new Error(`${toKbRel(abs)} already exists — pass overwrite:true to replace it.`);
     }
+    // Same snapshot the UI's Save and snap_render_job take, and for a sharper
+    // reason since a revise job started from KB Studio's prompt box rewrites
+    // an article the user did not hand-edit: without this, an agent replacing
+    // prose it misread is the ONE write in kb/ with no way back. The slug is
+    // the article, not the file: "my-feature.md" -> "my-feature" (sibling
+    // .history/), "my-feature/article.md" -> "my-feature" (history/ inside it)
+    // — exactly what historyDir() expects.
+    if (existsSync(abs)) {
+      const dir = path.dirname(rel);
+      snapshotKbHistory(dir === "." ? rel.replace(/.md$/i, "") : dir, readFileSync(abs, "utf8"));
+    }
     ensureDirFor(abs);
     writeFileSync(abs, content, "utf8");
+    pushKbArticleChanged(slugFromKbRel(rel), "snap_write_kb");
     return text(`Wrote ${toKbRel(abs)} (${content.length} bytes).`);
+  });
+
+  // The review loop's two halves: read what the human pinned, then say what
+  // you changed. Deliberately no add/delete here — the pins are the human's
+  // side of the conversation, and an agent that can delete the feedback it
+  // was given can make a correction disappear instead of acting on it.
+  mcp.registerTool("snap_comments", {
+    description: "Read the review comments a human pinned on a KB article's images in KB Studio — this is how corrections to your annotation placement come back to you. Every pin is resolved to REAL PIXELS in the base capture's coordinate space (the same space snap_add's props and job.json's els use), together with the job step that owns the image and the existing annotations nearest the pin, so a comment like \"this arrow points at nothing\" comes with the element to fix. Omit slug to see which articles have feedback waiting. Then: read .claude/skills/kb/PLACEMENT_PLAYBOOK.md, edit that step's els in job.json, re-run snap_render_job, LOOK at the exported PNG, and call snap_comment_resolve.",
+    inputSchema: {
+      slug: z.string().optional().describe("Article slug — \"my-feature\" for kb/my-feature.md or kb/my-feature/. Omit to list every article that has comments."),
+      includeResolved: z.boolean().optional().describe("Include comments that are already resolved. Default false — open feedback only."),
+    },
+  }, async ({ slug, includeResolved }) => {
+    const data = slug ? describeKbComments(slug, { includeResolved }) : listKbCommentCounts();
+    return text(JSON.stringify(data, null, 2));
+  });
+
+  mcp.registerTool("snap_comment_resolve", {
+    description: "Close the loop on one pinned comment — after the fix is actually made AND you have looked at the re-rendered PNG, not before. note says what you changed; it shows on the pin in KB Studio, so the human sees the fix without re-reading a diff. Resolve only what you fixed: a pin you decided to skip must stay open and be said out loud instead. When the comment corrected a PLACEMENT decision (something ran off the edge, covered its target, pointed at nothing), append a LEARNING to .claude/skills/kb/PLACEMENT_PLAYBOOK.md in the same pass — that file is the only reason the same mistake is not made again next article.",
+    inputSchema: {
+      slug: z.string().describe("Article slug the comment belongs to."),
+      id: z.string().describe("Comment id, from snap_comments."),
+      note: z.string().describe("What you changed, one line, e.g. \"moved step 4 up 120px so it no longer runs off the bottom edge\"."),
+      resolved: z.boolean().optional().describe("Default true. Pass false to reopen a comment resolved too early — that clears the note too."),
+    },
+  }, async ({ slug, id, note, resolved }) => {
+    const { comment } = setKbCommentResolved(slug, id, resolved !== false, { by: "agent", note });
+    return text(comment.resolved
+      ? `Resolved comment ${id} on "${slug}" — ${note}`
+      : `Reopened comment ${id} on "${slug}".`);
+  });
+
+  // job.json is the only file in a KB article that gets EDITED rather than
+  // written once — and a spawned KB job has no filesystem tool at all
+  // (kb-job.js grants tools: []), so without this it can re-render an article
+  // but never change where an annotation sits, which is exactly what a review
+  // comment asks for. Read and write are one tool because they are one
+  // operation in practice: read it, move an el, write it back.
+  mcp.registerTool("snap_job", {
+    description: "Read or replace a KB article's job.json — the file holding every step's prose and its annotation els, and the only thing snap_render_job renders from. Call with just slug to read; pass job to replace it (the WHOLE object, not a patch), then snap_render_job to see the result. This is how \"the arrow points at nothing\" actually gets fixed: read the job, move that step's el, write it back, re-render, look at the PNG with snap_view. Every write here also lands on the user's screen immediately: KB Studio draws each step image live from this file, so while an author job runs, write job.json after EACH captured step rather than once at the end — that is what lets the user watch the article being built, and fix a misplaced callout by hand without waiting for you.",
+    inputSchema: {
+      slug: z.string().describe("Article slug — the directory under kb/ that holds job.json, e.g. \"my-feature\"."),
+      job: z.record(z.string(), z.any()).optional().describe("Omit to read. To write: the COMPLETE job object (title, slug, md, steps[] each with n/heading/src/out/body/els). Anything left out is gone."),
+    },
+  }, async ({ slug, job }) => {
+    const abs = resolveOut(path.join(slug, "job.json"));
+    if (!job) {
+      if (!existsSync(abs)) {
+        throw new Error(`no job.json for "${slug}" (${toKbRel(abs)} does not exist). Flat single-file articles — kb/<slug>.md — have no job file; those are edited with snap_write_kb.`);
+      }
+      return text(readFileSync(abs, "utf8"));
+    }
+    if (!Array.isArray(job.steps) || !job.steps.length) {
+      throw new Error("job.steps[] is required and must not be empty — writing a job with no steps would throw away every annotation in the article.");
+    }
+    assertElShapes(job);
+    // One level of undo, kept beside the file it undoes. Overwriting job.json
+    // discards hand-tuned coordinates that took a browser session to produce;
+    // the .md has snapshotKbHistory() for exactly this reason, and the file
+    // those coordinates actually live in should not be the one with no way back.
+    let prev = "";
+    if (existsSync(abs)) {
+      writeFileSync(resolveOut(path.join(slug, "job.prev.json")), readFileSync(abs, "utf8"), "utf8");
+      prev = " Previous version kept as job.prev.json.";
+    }
+    ensureDirFor(abs);
+    writeFileSync(abs, JSON.stringify(job, null, 2), "utf8");
+    // The live surfaces in KB Studio draw straight from this file, so the user
+    // sees the element move the moment it is written — no render needed for that.
+    pushKbArticleChanged(slug, "snap_job");
+    return text(`Wrote ${toKbRel(abs)} (${job.steps.length} step(s)).${prev} Run snap_render_job to re-render from it.`);
+  });
+
+  // "Read the exported PNG back and check it" is a hard rule of the placement
+  // playbook, and until this tool existed a spawned job could not obey it at
+  // all: no filesystem tool, and its browser is scoped to the app's origin,
+  // not file://. An agent that cannot see its own output writes "looks good"
+  // over a callout hanging off the edge of the image.
+  mcp.registerTool("snap_view", {
+    description: "Look at an image under kb/ — returns the actual picture, so you can SEE whether a callout runs off the edge, covers what it points at, or leaves PII visible. Call it on every PNG you export or re-render, before saying the article is done; \"it should be fine\" is not verification. (In Claude Code the built-in Read tool does the same job — this is for sessions with no filesystem access.)",
+    inputSchema: { path: z.string().describe("Image path relative to kb/, e.g. \"img/01-dashboard-annotated.png\"") },
+  }, async ({ path: rel }) => {
+    const abs = resolveOut(rel);
+    if (!existsSync(abs)) throw new Error(`no image at ${toKbRel(abs)}`);
+    const bytes = readFileSync(abs);
+    const MAX_INLINE = 4 * 1024 * 1024;
+    if (bytes.length > MAX_INLINE) {
+      throw new Error(`${toKbRel(abs)} is ${(bytes.length / 1048576).toFixed(1)}MB — too big to return inline. Re-render it at a smaller scale.`);
+    }
+    const ext = path.extname(abs).toLowerCase();
+    const mime = IMAGE_MIME[ext] || "image/png";
+    let dims = "";
+    try { if (ext === ".png") { const s = pngSize(abs); dims = ` — ${s.w}x${s.h}`; } } catch {}
+    return {
+      content: [
+        { type: "text", text: `${toKbRel(abs)}${dims}` },
+        { type: "image", data: bytes.toString("base64"), mimeType: mime },
+      ],
+    };
+  });
+
+  // The one write this server allows outside kb/, and the reason is the whole
+  // point of the playbook: a lesson learned by a session that cannot edit
+  // files dies with that session, and the same annotation lands in the same
+  // wrong place next week. Append-only, one fixed file, size-capped — it can
+  // add a line to the log, it cannot rewrite the rules above it.
+  mcp.registerTool("snap_learn", {
+    description: "Append one dated LEARNING to .claude/skills/kb/PLACEMENT_PLAYBOOK.md — the shared memory of how to place annotations in this repo. Call it when a human correction (usually a pinned comment) taught something a future article should not have to relearn: what was placed wrong, why it was wrong, and the rule that follows. One or two sentences of substance, not \"fixed the arrow\". Append-only: it cannot change or delete what is already there.",
+    inputSchema: {
+      text: z.string().describe("The learning: what was placed wrong · why · the rule it implies. Written for whoever places the next annotation, not as a changelog entry."),
+    },
+  }, async ({ text: learning }) => {
+    const body = String(learning || "").trim();
+    if (body.length < 20) throw new Error("a learning that short teaches nothing — say what was wrong, why, and the rule it implies.");
+    if (body.length > 1200) throw new Error(`${body.length} characters is too long for one learning (max 1200) — keep it to the rule, not the whole session.`);
+    const abs = path.join(REPO_ROOT, ".claude", "skills", "kb", "PLACEMENT_PLAYBOOK.md");
+    if (!existsSync(abs)) throw new Error(`${abs} does not exist — nothing to append to.`);
+    const today = new Date().toISOString().slice(0, 10);
+    const existing = readFileSync(abs, "utf8");
+    const eol = existing.includes("\r\n") ? "\r\n" : "\n";
+    // Indent continuation lines so the bullet keeps the shape of the ones
+    // already in LEARNINGS — the file is read by humans as often as by models.
+    const wrapped = body.split(/\r?\n/).map((l, i) => (i === 0 ? `- **${today}** — ${l}` : `  ${l}`)).join(eol);
+    writeFileSync(abs, existing.replace(/\s*$/, "") + eol + eol + wrapped + eol, "utf8");
+    return text(`Appended a LEARNING dated ${today} to PLACEMENT_PLAYBOOK.md.`);
   });
 
   mcp.registerTool("snap_frame_list", {
@@ -751,6 +1220,9 @@ function buildMcpServer() {
       [{ srcAbs: lastOpened.abs, outAbs: absOut, els: null, rawEls: state.els }],
       { scale: scale || 1, accent },
     );
+    // A bare output path, with no article attached to it — the UI reads a null
+    // slug as "re-read whatever is open", which is the best that can be said here.
+    pushKbArticleChanged(slugFromKbRel(out), "snap_export");
     return text(`Exported ${res.width}x${res.height} to ${toKbRel(absOut)} (headless).${warn ? `\nWARNING: ${warn}` : ""}`);
   });
 

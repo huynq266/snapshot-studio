@@ -5,6 +5,11 @@ Cả Claude lẫn người dùng cùng sửa file này. Claude ĐỌC TRƯỚC k
 step / textbox / highlight / arrow / zoom nào, và APPEND một LEARNING mới mỗi
 lần người dùng sửa lại một chỗ đặt sai.
 
+Người dùng sửa chủ yếu bằng cách GHIM COMMENT lên đúng điểm sai trên ảnh trong
+KB Studio. Đọc bằng `snap_comments` (pin đã quy đổi sẵn ra pixel của ảnh gốc,
+kèm step và element gần nhất), đóng bằng `snap_comment_resolve` — quy trình đầy
+đủ ở SKILL.md, phần "Vòng review".
+
 File này dạy CÁCH ĐẶT, không dạy CHỌN component nào — việc chọn component đã có
 `snap_kit` (đọc từ `src/kit-catalog.js`, mỗi component có `use_when` + `gotchas`
 riêng). Gọi `snap_kit` để chọn, đọc file này để đặt. Đừng chép lẫn nhau.
@@ -136,7 +141,9 @@ người dùng, đừng tự quyết là "chắc không sao".
 ## LEARNINGS (mới nhất trước)
 
 *(Skill `/kb` append vào đây mỗi khi người dùng sửa lại một chỗ đặt sai. Ghi: ngày · đặt sai
-thế nào · vì sao sai · luật rút ra.)*
+thế nào · vì sao sai · luật rút ra. Nguồn chính của những lần sửa đó là comment ghim trên ảnh:
+mỗi comment về **cách đặt** mà bạn `snap_comment_resolve` phải để lại một dòng ở đây — resolve mà
+không ghi thì bài học chết theo cái pin.)*
 
 - **2026-08-28 (lần chạy thử playbook này)** — Ba lỗi cũ **đều không tái diễn**. Ba điều học
   thêm được:
@@ -159,3 +166,15 @@ thế nào · vì sao sai · luật rút ra.)*
 - **2026-08-28** — Lần dựng KB đầu tiên lộ ba lỗi cùng lúc: Step 4 tràn mép (→ #0), Step 5 đè
   nội dung (→ #1), lộ tên tài khoản thật (→ #6). Cả ba đều là lỗi *đặt* và *chụp*, không phải
   lỗi chọn component — đó là lý do playbook này tách khỏi `snap_kit`.
+
+- **2026-08-29** — 2026-08-29 — Revise job (no browser) on a flat single-file article (how-to-search-wikipedia, no job.json): the exported "-annotated.png" referenced in the markdown was NOT pixel-identical in resolution to its own unannotated base file on disk (annotated 2026x1008 vs true base img/01-homepage.png at 2560x1249 — same page, non-uniform aspect difference, cause unclear, not a clean scale factor). Do not reverse-engineer element coordinates by reading pixels off the (smaller) annotated export and reusing them on the base — open the actual unannotated base PNG, re-estimate target coordinates directly on IT, then render+snap_view to verify/iterate before overwriting the annotated file. Worked first try here for a well-defined target (search input + button) by eyeballing fractions of the base image width/height and refining with one test render.
+
+- **2026-08-30** — 2026-08-30 — "step" (step-marker) component's number is NOT settable via any snap_add/job.json prop in this build. Tried n, number, index, step, label, text, variant:"compact" — always renders "Step 1", both via direct snap_add on a flat capture and via job.json steps[].n through snap_render_job. Confirmed engine limitation (12+ isolated tests, ruled out caching/stale-editor first per principle #3) — don't burn more than 2-3 prop-name guesses on this again. WORKAROUND: use type `label` instead, props:{x,y,text:"Step N"} — renders the literal text correctly, top-left positioned like a step badge. Its default pill is solid black, not `step`'s purple/white-ring style, so use `label` for EVERY step in an article (not just the broken ones) to keep a consistent look. Also: for a full-bleed capture, a highlight box's edge nearest a canvas/page corner (e.g. near a logo) can render clipped-looking even when props look right and the box's far edge is correctly placed — the canvas padding/scaling affects edges unevenly near corners; if only the near edge looks wrong, nudge it outward ~60-80px, not ~10-20px.
+
+- **2026-08-30** — 2026-08-30 — Manual pixel-coordinate estimates from viewing a PNG are unreliable, even carefully: fixing "highlight lệch" I first extended a search-box highlight's left edge from x=700 to x=605 to stop it looking short, which actually pushed it INTO the neighboring "WikipediA" wordmark — invisible until the re-render was viewed. Separately, a title's real bbox was misjudged by ~170px. Rule: treat any manually-estimated x/y as a draft; after rendering, specifically check the highlight border against the target's real edges for overshoot into a NEIGHBORING element, not just undershoot, and expect 2-3 render/view iterations, not one. Also: a task prompt claiming "no job.json" can be stale — try `snap_job` first regardless; it returned real, useful ground-truth coordinates here.
+
+- **2026-08-30** — 2026-08-30 — how-to-search-wikipedia steps 1-2 (Wikipedia main page, capture 2560x1249, Vector 2022 skin): job.json existed despite the revise-job prompt's metadata claiming "flat single-file, no job.json" — per the 2026-08-30 learning, always try snap_job first regardless of what the task description says. The highlight box around the search input was too wide on the left (x=705,w=320), spilling into the "WikipediA" logo/wordmark to its left instead of framing just the input; the right edge (705+320=1025) happened to be correct. Fix: x=790,y=10,w=245,h=34 tightly frames just the search `<input>` (magnifier icon + placeholder/typed text), excluding both the logo on the left and the separate "Search" button on the right. Rule: when a highlight "looks close but shifted", check whether it's actually bracketing a wider region than the real target (input-only vs input+button, or target+neighboring element) rather than assuming a uniform x/y translation — the right edge here was already right, only the left edge needed to move ~85px.
+
+- **2026-08-30** — 2026-08-30 — textbox component (mode:"note") ignores any prop named text/note/title/heading for its content — only `body` is respected for the message; the header title is hard-coded to "Tip" and cannot be overridden by any prop name tried (title, heading). Same class of bug as the step-marker's fixed "Step 1" numeral (2026-08-30 learning). WORKAROUND: just write the note's message via props.body and accept the English "Tip" header even in a non-English article — don't burn more than 1-2 prop-name guesses on the header text next time.
+
+- **2026-08-30** — 2026-08-30 — job.json steps[].els items must nest all annotation fields under a "props" key ({type, props:{x,y,...}}), matching snap_add's own {type, props} shape. Writing them flat ({type, x, y, text, ...} as siblings, no props wrapper) is silently accepted by snap_job/snap_render_job with no error, but the renderer then ignores every field and falls back to each component's hardcoded demo defaults (blur/highlight/zoom disappear entirely, textbox/label/step render the canned "Step 1 / Open Settings / Click the icon..." sample copy instead of your text) — a full 3-image article rendered wrong silently until the PNGs were actually viewed. Always nest under props when hand-building job.json (snap_job read of a working job confirms the shape); re-render and snap_view immediately after the first write to catch this class of silent-default bug before iterating on placement.

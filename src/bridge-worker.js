@@ -28,6 +28,7 @@ function connectBridge() {
 
   ws.addEventListener('open', () => {
     console.log('[snap-bridge] connected to', BRIDGE_URL);
+    broadcastBridgeStatus(true);
     pingTimer = setInterval(() => {
       try { ws.send(JSON.stringify({ type: 'ping' })); } catch (e) {}
     }, PING_MS);
@@ -38,6 +39,7 @@ function connectBridge() {
     try { msg = JSON.parse(ev.data); } catch (e) { return; }
     if (msg.type === 'pong') return;
     if (msg.type === 'kb_progress') { relayKbProgress(msg.line); return; }
+    if (msg.type === 'kb_article_changed') { relayKbArticleChanged(msg); return; }
     if (msg.reqId && kbPending.has(msg.reqId)) { resolveKbPending(msg); return; }
     if (msg.reqId && msg.cmd) handleBridgeCommand(msg).catch(() => {});
   });
@@ -49,8 +51,20 @@ function connectBridge() {
 function teardownBridge() {
   if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
   bridgeWs = null;
+  broadcastBridgeStatus(false);
 }
 function scheduleReconnect() { setTimeout(connectBridge, RECONNECT_MS); }
+
+/** The KB tab cannot see this socket, and a failed kb_list is indistinguishable
+ *  from an empty kb/ folder from where it sits — which is exactly how a bridge
+ *  that died over a reboot reads as "all my articles are gone". So the socket
+ *  announces itself both ways: bridge-kb.js paints an offline rail on false and
+ *  re-lists on true, without polling. sendMessage with no editor tab open is a
+ *  benign "no receiving end" — swallowed via lastError like everywhere else. */
+function broadcastBridgeStatus(connected) {
+  chrome.runtime.sendMessage({ type: 'kb-bridge-status', connected }, () => void chrome.runtime.lastError);
+}
+function bridgeIsUp() { return !!bridgeWs && bridgeWs.readyState === WebSocket.OPEN; }
 
 /** Topology B — this worker as the REQUEST-INITIATING side for once (every
  *  other exchange on this connection has the bridge asking, this file
@@ -81,6 +95,17 @@ function resolveKbPending(msg) {
 function relayKbProgress(line) {
   chrome.runtime.sendMessage({ type: 'kb-progress', line }, () => void chrome.runtime.lastError);
 }
+/** Something under kb/ was written by someone other than this tab — an agent's
+ *  snap_job / snap_render_job / snap_export, or another editor tab saving. KB
+ *  Studio draws its step images live from job.json, so this is what puts an
+ *  agent's edit on screen while its job is still running instead of after it.
+ *  Same broadcast shape as kb-progress, and for the same reason. */
+function relayKbArticleChanged(msg) {
+  chrome.runtime.sendMessage(
+    { type: 'kb-article-changed', slug: msg.slug || null, source: msg.source || null },
+    () => void chrome.runtime.lastError,
+  );
+}
 
 /** Editor tab (bridge-kb.js) -> this worker -> bridge, for kb_start/kb_cancel/
  *  kb_query. Broadcast-reply by reqId, same reasoning as snap-bridge-reply
@@ -92,6 +117,42 @@ chrome.runtime.onMessage.addListener((msg) => {
   callBridge('kb_' + cmd, args || {}).then(
     (data) => chrome.runtime.sendMessage({ type: 'kb-bridge-reply', reqId, ok: true, data }, () => void chrome.runtime.lastError),
     (err) => chrome.runtime.sendMessage({ type: 'kb-bridge-reply', reqId, ok: false, error: String((err && err.message) || err) }, () => void chrome.runtime.lastError)
+  );
+});
+
+/* ---------------------------------------------------------------------
+ * "Start bridge" — the one command that must work while the bridge is
+ * DOWN, so it cannot travel over the bridge's own WebSocket like every
+ * other kb_* above. It goes out through Chrome native messaging to
+ * snap-bridge/native-host/snap-bridge-host.mjs, which spawns
+ * snap-bridge/server.js detached and only answers once the port is
+ * actually accepting connections. The host takes no path or argument
+ * from here — 'start' and 'status' are the entire vocabulary.
+ *
+ * If the host was never registered, sendNativeMessage rejects with
+ * Chrome's own "Specified native messaging host not found." — passed
+ * through verbatim, because bridge-kb.js keys its install hint off it.
+ * ------------------------------------------------------------------- */
+const NATIVE_HOST = 'com.snapstudio.bridge';
+
+chrome.runtime.onMessage.addListener((msg) => {
+  if (!msg || msg.type !== 'kb-local-cmd') return;
+  const { reqId, cmd } = msg;
+  (async () => {
+    if (cmd === 'status') return { connected: bridgeIsUp() };
+    if (cmd === 'launch') {
+      if (bridgeIsUp()) return { connected: true, already: true };
+      const res = await chrome.runtime.sendNativeMessage(NATIVE_HOST, { cmd: 'start' });
+      if (!res || !res.ok) throw new Error((res && res.error) || 'the launcher returned no answer');
+      // The host only replies once the port is live, so the 4s reconnect
+      // backoff is pure latency at this point — reach for the socket now.
+      connectBridge();
+      return { connected: true, already: !!res.already, port: res.port };
+    }
+    throw new Error(`unknown local command "${cmd}"`);
+  })().then(
+    (data) => chrome.runtime.sendMessage({ type: 'kb-local-reply', reqId, ok: true, data }, () => void chrome.runtime.lastError),
+    (err) => chrome.runtime.sendMessage({ type: 'kb-local-reply', reqId, ok: false, error: String((err && err.message) || err) }, () => void chrome.runtime.lastError)
   );
 });
 
@@ -214,35 +275,97 @@ async function cmdGetAccent() {
  *  the only reliable choice once more than one tab could match a URL), then
  *  a URL substring match among open tabs, then — with neither given —
  *  resolveTarget()'s "active tab, or the last normal one seen" fallback,
- *  the same logic background.js's own toolbar capture path uses. Either
- *  way: activate it, focus its window, wait for paint, then shoot. Same
- *  shape as captureWholeTab() above, parameterized. */
+ *  the same logic background.js's own toolbar capture path uses. The shot
+ *  itself goes through shootQuietly() below rather than straight to
+ *  shootVisibleTab(), and that is the whole difference between this and
+ *  captureWholeTab(): the toolbar path runs because the user just clicked
+ *  Snap and is watching it happen, while a KB job runs unattended for
+ *  minutes and must not own the screen for all of them. */
 async function cmdCaptureTab({ tabId, url }) {
   let tab;
+  let quiet = true;
   if (tabId != null) {
     try { tab = await chrome.tabs.get(tabId); }
     catch (e) { throw new Error(`no tab with id ${tabId} (it may have been closed)`); }
     if (!capturable(tab.url)) throw new Error(`can't capture tab ${tabId}: ${uncapturable(tab.url)}`);
-    await chrome.tabs.update(tab.id, { active: true });
-    await chrome.windows.update(tab.windowId, { focused: true });
-    await wait(160);
-    tab = await chrome.tabs.get(tab.id);
   } else if (url) {
     const tabs = await chrome.tabs.query({});
     tab = tabs.find((t) => t.url && t.url.includes(url) && capturable(t.url));
     if (!tab) throw new Error(`no open tab matches "${url}"`);
-    await chrome.tabs.update(tab.id, { active: true });
-    await chrome.windows.update(tab.windowId, { focused: true });
-    await wait(160);
-    tab = await chrome.tabs.get(tab.id);
   } else {
+    // resolveTarget() has already activated its pick and focused that window,
+    // so there is nothing left to keep quiet and nothing to put back either.
     const { tab: resolved, error } = await resolveTarget();
     if (error) throw new Error(error);
     tab = resolved;
+    quiet = false;
   }
-  const dataUrl = await shootVisibleTab(tab.windowId);
+  const dataUrl = quiet ? await shootQuietly(tab) : await shootVisibleTab(tab.windowId);
+  // Re-read for the URL only — the tab may have settled a redirect while the
+  // shot was being taken, and the caller writes this URL into the article.
+  tab = await chrome.tabs.get(tab.id).catch(() => tab);
   const size = pngSize(dataUrl);
   return { dataUrl, url: tab.url || '', width: size.width, height: size.height };
+}
+
+/** captureVisibleTab always shoots the ACTIVE tab of the window it is handed,
+ *  so the target does have to be activated — but that window does NOT have to
+ *  hold the OS focus, and the gap between those two facts is where this
+ *  function lives. The old path activated the tab AND raised its window on
+ *  every single shot, so a KB job stole the keyboard once per step; here the
+ *  window is only raised when there is provably nothing to photograph without
+ *  it (minimised, or the shot threw — Windows stops compositing a fully
+ *  occluded window, and that surfaces here as a failed capture), and anything
+ *  we did move is moved back the moment the pixels are in hand.
+ *
+ *  The restore only ever undoes what WE changed: if the user switched tabs
+ *  themselves while the shot was in flight, their choice stands. */
+async function shootQuietly(tab) {
+  const winId = tab.windowId;
+  let prevTabId = null;
+  if (!tab.active) {
+    const [cur] = await chrome.tabs.query({ active: true, windowId: winId });
+    if (cur && cur.id !== tab.id) prevTabId = cur.id;
+    await chrome.tabs.update(tab.id, { active: true });
+  }
+  // Unconditional, as the old path was: the settle is not only for the tab
+  // switch above. A capture usually lands right behind a frame_scroll or
+  // frame_click, and those are still finishing when the call returns.
+  await wait(160);
+  try {
+    let win = null;
+    try { win = await chrome.windows.get(winId); } catch (e) {}
+    const minimized = !!win && win.state === 'minimized';
+    if (!minimized) {
+      try { return await shootVisibleTab(winId); } catch (e) { /* occluded — fall through and raise it */ }
+    }
+    return await shootRaised(winId, minimized);
+  } finally {
+    if (prevTabId != null) {
+      const [now] = await chrome.tabs.query({ active: true, windowId: winId });
+      if (now && now.id === tab.id) { try { await chrome.tabs.update(prevTabId, { active: true }); } catch (e) {} }
+    }
+  }
+}
+
+/** Last resort for a minimised or fully occluded window: raise it, shoot, then
+ *  put it back exactly as it was found — an un-minimised window left sitting
+ *  over the user's work, or the focus left behind in it, is the same theft
+ *  shootQuietly() exists to avoid, just spread over the rest of the job. */
+async function shootRaised(winId, wasMinimized) {
+  let prevWinId = null;
+  try {
+    const w = await chrome.windows.getLastFocused();
+    if (w && w.focused && w.id !== winId) prevWinId = w.id;
+  } catch (e) {}
+  try { await chrome.windows.update(winId, wasMinimized ? { focused: true, state: 'normal' } : { focused: true }); } catch (e) {}
+  await wait(220);
+  try {
+    return await shootVisibleTab(winId);
+  } finally {
+    if (wasMinimized) { try { await chrome.windows.update(winId, { state: 'minimized' }); } catch (e) {} }
+    if (prevWinId != null) { try { await chrome.windows.update(prevWinId, { focused: true }); } catch (e) {} }
+  }
 }
 
 /** No <img>/<canvas> in a service worker, so pixel size comes out of the PNG
@@ -269,9 +392,23 @@ function pngSize(dataUrl) {
  *  fires on, without needing a listener of its own here. */
 async function waitTabComplete(tabId, timeoutMs = 15000) {
   const start = Date.now();
+  let revived = false;
   while (Date.now() - start < timeoutMs) {
     let tab;
     try { tab = await chrome.tabs.get(tabId); } catch (e) { return; }   // tab gone — let the caller's own send fail loudly
+    /* Chrome's memory saver discards long-idle background tabs, and a discarded
+       tab runs no scripts at all — no onMessage listener, so the send below
+       would just sit there until relayToEditor's own 45s timeout. Activating it
+       used to un-discard it as a side effect of focusing; now that the relay
+       leaves the user's tab alone, reload() is what brings it back, and it does
+       so without pulling the tab to the front. */
+    if (tab.discarded) {
+      if (revived) return;                                              // reloaded once and still discarded — let the send fail loudly
+      revived = true;
+      try { await chrome.tabs.reload(tabId); } catch (e) { return; }
+      await wait(120);
+      continue;
+    }
     if (tab.status === 'complete') return;
     await wait(120);
   }
@@ -281,11 +418,28 @@ async function waitTabComplete(tabId, timeoutMs = 15000) {
  *  reqId over a broadcast chrome.runtime.onMessage listener — not the
  *  callback of the chrome.tabs.sendMessage() call below, which async
  *  responses are known to drop across an MV3 service-worker wake cycle.
- *  Opens the editor tab first if it is not already open. */
+ *  Opens the editor tab first if it is not already open — in the background,
+ *  which is what ensureEditor() has always done.
+ *
+ *  It is NOT brought to the front. open/add/get_els are plain DOM work driven
+ *  by a chrome.runtime.onMessage listener, and that listener fires in a hidden
+ *  tab exactly as it does in a visible one; nothing on this path waits for a
+ *  frame (the only requestAnimationFrame calls in the editor live in export.js
+ *  and render-api.js, and rAF never fires in a background tab — see cmdExport
+ *  below). Focusing here therefore bought nothing and cost the user their tab
+ *  on every single snap_add, of which one KB job fires dozens. That is the
+ *  "the agent keeps throwing me onto the extension tab" complaint.
+ *
+ *  `export` is the exception and the reason this is a condition rather than a
+ *  deletion: cmdExport() in bridge-editor.js shoots the editor tab itself with
+ *  captureVisibleTab and waits on rAF, both of which need it actually visible.
+ *  Nothing in snap-bridge calls it any more — snap_export renders headless off
+ *  get_els (server.js) — but the relay still carries the command, so when it is
+ *  used it still gets the window it needs. */
 async function relayToEditor(cmd, args) {
   const editor = await ensureEditor();
   await waitTabComplete(editor.id);
-  await focusEditor(editor);
+  if (cmd === 'export') await focusEditor(editor);
   return new Promise((resolve, reject) => {
     const reqId = 'bw_' + Math.random().toString(36).slice(2, 10);
     const timer = setTimeout(() => {

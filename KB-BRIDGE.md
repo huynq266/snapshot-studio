@@ -310,6 +310,82 @@ nhận đúng nguồn thì hướng xử lý vẫn là phía driver/hệ điều
 nội dung KB thật của người dùng) — xoá bằng nút Delete rồi chụp lại sau khi xác định/tắt được
 nguồn là đủ, không cần giữ.
 
+### Job không được cướp focus của người dùng (2026-08-30)
+
+**Triệu chứng**: mỗi lần agent chạy job KB, màn hình bị giật sang tab extension, gõ dở câu nào
+mất câu đó. Người dùng không làm được việc khác trong lúc job chạy — mà job chạy hàng phút.
+
+**Ba chỗ gây ra, theo thứ tự mức độ**:
+
+1. `relayToEditor()` (`src/bridge-worker.js`) gọi `focusEditor()` trước **mọi** lệnh chuyển
+   xuống tab editor — `open`, `add`, `get_els`. Một bài KB gọi `snap_add` hàng chục lần, nên
+   đây là nguồn chính của "tự nhảy qua tab extension". Và nó **không cần thiết**: cả ba lệnh chỉ
+   là thao tác DOM chạy trong listener `chrome.runtime.onMessage`, mà listener đó nổ trong tab
+   ẩn y hệt tab đang hiện; đường render của `editor.js` không chờ `requestAnimationFrame` ở
+   đâu cả (rAF chỉ có trong `export.js` và `render-api.js`).
+   → Bỏ focus, **trừ** `cmd === 'export'`: `cmdExport()` trong `bridge-editor.js` tự chụp
+   chính tab editor bằng `captureVisibleTab` và có chờ rAF, hai thứ bắt buộc tab phải hiện.
+   `snap_export` từ lúc chuyển sang render headless (`get_els` + `render.mjs`) không đi qua
+   đường đó nữa, nhưng relay vẫn mang lệnh nên vẫn giữ nhánh focus cho đúng.
+
+2. `cmdCaptureTab()` `tabs.update({active:true})` **và** `windows.update({focused:true})`
+   trước mỗi lần chụp. `captureVisibleTab` luôn chụp **tab đang active của cửa sổ được truyền
+   vào**, nên activate tab thì bắt buộc — nhưng **raise cửa sổ thì không**. Đó là toàn bộ khoảng
+   trống mà `shootQuietly()` sống trong đó: chỉ activate khi tab chưa active, không raise cửa
+   sổ, chụp xong trả lại đúng tab người dùng đang mở. Chỉ raise khi thật sự không còn gì để
+   chụp — cửa sổ minimized, hoặc `captureVisibleTab` ném lỗi (Windows ngừng composite cửa sổ
+   bị che hoàn toàn) — rồi `shootRaised()` trả cửa sổ về đúng trạng thái cũ, kể cả minimized.
+   Restore chỉ hoàn tác **cái mình đổi**: nếu người dùng tự chuyển tab trong lúc đang chụp thì
+   giữ nguyên lựa chọn của họ.
+
+3. `cmdOpen()` gọi `setView('snap')`, trước chỉ chừa tab KB. Giờ tab editor không còn bị kéo
+   ra trước nữa nên điều kiện đúng là `document.hidden` — không ai đang nhìn thì mới đổi view.
+   Người đang ngồi ở Library/Lab/KB là cố ý ở đó.
+
+**Còn lại, không sửa được từ repo này**: `mcp__chrome__navigate` là của Chrome Bridge
+(`claude.exe --chrome-native-host`, xem `snap-bridge/chrome-bridge-config.js`) — nó tự
+activate tab của nhóm nó khi mở trang, và đó là extension khác.
+
+**Đường `resolveTarget()` không đụng tới**: đó là nhánh `snap_capture_tab` không có `tabId`,
+mà `canUseTool` trong `kb-job.js` từ chối thẳng nhánh đó — job luôn phải truyền `tabId` từ
+`navigate`. Nó chỉ còn phục vụ nút Snap trên toolbar, nơi người dùng vừa bấm và đang nhìn.
+
+### Cửa sổ Windows Terminal nhảy lên mỗi lần render (2026-08-30)
+
+**Triệu chứng**: mỗi lần job chạy, một cửa sổ console (trông như PowerShell) bật lên.
+
+**Đo được, không phải suy đoán** — theo dõi tiến trình mới sinh trong lúc gọi `snap_export`:
+
+```
+12:08:32.492  chrome-headless-shell.exe   ppid = node server.js
+12:08:32.493  conhost.exe                 ppid = chrome-headless-shell
+12:08:32.494  OpenConsole.exe    -Embedding
+12:08:32.495  WindowsTerminal.exe -Embedding
+```
+
+Bốn tiến trình trong 3 mili-giây, ngay lúc `renderSteps()` gọi `chromium.launch()`.
+
+**Nguyên nhân**: `chrome-headless-shell.exe` là binary **console subsystem**. `launchProcess()`
+của `playwright-core` dựng `spawnOptions` chỉ gồm `detached` (và chỉ cho non-win32), `env`,
+`cwd`, `shell`, `stdio` — **không có `windowsHide`**. Mà `server.js` được native host spawn
+detached, không thừa kế console nào, nên Windows cấp cho headless shell một console mới; trên
+Windows 11 console host mặc định là Windows Terminal, nên nó hiện ra thành một cửa sổ thật.
+
+**Vá**: `withHiddenConsole()` trong `render.mjs` — monkey-patch `child_process.spawn` ép
+`windowsHide: true` (cờ `CREATE_NO_WINDOW`) đúng trong lúc gọi `launch()`, rồi khôi phục
+trong `finally`. Playwright không hở tuỳ chọn spawn nào ra API công khai nên không có đường
+sạch hơn. Cờ này không đụng đường điều khiển: Playwright nói chuyện với browser qua
+`--remote-debugging-pipe` (fd 3/4), không qua console.
+
+**Đã xác nhận sau khi vá**: chạy lại đúng `snap_export` đó → vẫn có `chrome-headless-shell.exe`
+và một `conhost.exe` (console không cửa sổ, đúng ý nghĩa của `CREATE_NO_WINDOW`), nhưng
+**không còn `OpenConsole.exe` lẫn `WindowsTerminal.exe`**.
+
+**Đường đã cân nhắc và bỏ**: `chromium.launch({ channel: "chromium" })` dùng bản Chromium đầy
+đủ (`chrome.exe` là GUI subsystem nên không cấp console) — bản `chromium-1234` có sẵn trong
+`ms-playwright`. Bỏ vì nó đổi hẳn build trình duyệt đang render ảnh KB, tức đổi cả kết quả
+render, quá đắt cho một cửa sổ console.
+
 ---
 
 ## 0. Bốn điều đã kiểm chứng trên máy này (không phải suy đoán)
@@ -359,8 +435,8 @@ lý do `snap-bridge` phải tồn tại như một kênh riêng.
 
 ## 2. Bề mặt tool của `snap-bridge`
 
-Sáu tool, mỗi cái ánh xạ thẳng vào một đường đã có sẵn trong mã nguồn — không cái nào đòi viết
-lại engine của editor:
+Sáu tool đầu tiên (bản trial), mỗi cái ánh xạ thẳng vào một đường đã có sẵn trong mã nguồn —
+không cái nào đòi viết lại engine của editor:
 
 | Tool | Làm gì | Đi qua mã nào đã có |
 |---|---|---|
@@ -370,6 +446,23 @@ lại engine của editor:
 | `snap_kit` | Trả `use_when` / `gotchas` của 8 component | `src/kit-catalog.js` |
 | `snap_add` | Thêm annotation vào ảnh đang mở | `newElement(type)` trong `editor.js` — `step`, `textbox`, `highlight`, `blur`, `zoom`, `arrow`, `spotlight`, `label`, `image`, `custom:<id>` |
 | `snap_export` | Render PNG cuối, ghi ra đường dẫn | `export.js` → `renderToPngDataUrl()` |
+
+**Thêm sau bản trial** (tổng 14 tool):
+
+| Tool | Làm gì |
+|---|---|
+| `snap_frame_list` / `snap_frame_find` / `snap_frame_scroll` / `snap_frame_click` | Với tới nội dung trong iframe cross-origin — xem mục "Điều khiển nội dung trong iframe cross-origin" ở trên |
+| `snap_render_job` | Render lại cả bài từ `job.json`, không chụp lại |
+| `snap_write_kb` | Ghi `kb/<slug>.md` (mục 7 — không có RPC nào sang extension) |
+| `snap_comments` | Đọc comment người dùng ghim trong KB Studio: pin `xNorm/yNorm` → **pixel trong hệ toạ độ ảnh gốc**, + step sở hữu ảnh, + element gần pin nhất kèm `props` |
+| `snap_comment_resolve` | Đóng một comment kèm `note` "đã sửa gì" — note hiện lại trên pin trong UI |
+| `snap_job` | Đọc / ghi đè `job.json` (giữ một bản `job.prev.json` để undo) — đường duy nhất để một phiên **không có tool sửa file** dời được một annotation |
+| `snap_view` | Trả về **chính tấm ảnh** trong `kb/` dưới dạng image block — phiên spawn không có `Read`, mà "nhìn lại ảnh đã xuất" là luật cứng của playbook |
+| `snap_learn` | Append một LEARNING vào `PLACEMENT_PLAYBOOK.md`. Write **duy nhất** ra ngoài `kb/`: append-only, một file cố định, giới hạn 1200 ký tự — bài học của một phiên không có tool sửa file mà không ghi lại được thì chết theo phiên đó |
+
+Hai tool comment cố tình **không** có `add` / `delete`: pin là phía người dùng nói. Một agent xoá
+được feedback thì một correction có thể biến mất thay vì được xử lý — mà đó chính là thứ cả vòng
+review này tồn tại để giữ lại.
 
 ### Bẫy đã có sẵn trong README, phải xử lý trong `snap_export`
 
@@ -403,6 +496,45 @@ hoặc `.mcp.json` ở gốc repo:
   }
 }
 ```
+
+### Nút "Start bridge" trong Studio (native messaging)
+
+`snap-bridge` là một tiến trình rời, **không có gì tự bật lại sau khi khởi động máy**.
+Triệu chứng đã gặp: mở tab KB thấy rail Articles trống trơn, tưởng mất hết bài — thực ra
+`kb/` vẫn nguyên, chỉ là `kb_list` đi qua WebSocket của bridge mà bridge thì không chạy.
+Rail giờ nói thẳng điều đó, kèm nút bật lại.
+
+Trang extension không thể spawn tiến trình, nên nút đó phải đi qua **Chrome native
+messaging** — đường duy nhất Chrome cho phép một extension chạm tới OS:
+
+```
+bridge-kb.js --kb-local-cmd--> bridge-worker.js --sendNativeMessage-->
+  snap-bridge-host.cmd -> snap-bridge-host.mjs --spawn detached--> server.js
+```
+
+- `snap-bridge/native-host/snap-bridge-host.mjs` — host, chỉ hiểu đúng hai lệnh `status` và
+  `start`. Nó không nhận đường dẫn hay tham số nào từ extension: thứ nó chạy được hardcode
+  là `../server.js` ngay bên cạnh, nên điều xấu nhất một trang bị chiếm quyền làm được qua
+  nó là bật chính cái bridge của repo này. Host chỉ trả lời khi port **đã thật sự lắng
+  nghe**, nên UI không bao giờ báo "xong" trong lúc server còn đang lên.
+- `snap-bridge/native-host/install.ps1` — ghi manifest, shim `.cmd` (Chrome trên Windows
+  không chạy thẳng được `.mjs`, và không bảo đảm có PATH dùng được, nên đường dẫn node được
+  nướng cứng vào shim) và khoá registry
+  `HKCU\Software\Google\Chrome\NativeMessagingHosts\com.snapstudio.bridge`.
+  **Chạy một lần**, và chạy lại mỗi khi repo đổi thư mục — extension unpacked đổi ID theo
+  đường dẫn nạp, script tự dò ID đó ra từ profile Chrome:
+
+  ```powershell
+  powershell -ExecutionPolicy Bypass -File snap-bridge\native-host\install.ps1
+  # gỡ:  powershell -ExecutionPolicy Bypass -File snap-bridge\native-host\install.ps1 -Uninstall
+  ```
+
+  Sau đó **reload extension** ở `chrome://extensions` — quyền `nativeMessaging` chỉ được cấp
+  khi nạp lại.
+
+Chưa cài host thì nút vẫn hiện; bấm vào sẽ in đúng câu lệnh trên kèm nút copy, thay vì im
+lặng thất bại. Muốn khỏi bấm hẳn thì thêm scheduled task chạy lúc logon, đúng kiểu
+`ccchrome-bridge` vẫn làm — nhưng nút này cố ý không phụ thuộc vào việc đó.
 
 ## 3. Luồng dựng một bài KB
 
@@ -572,3 +704,207 @@ job không bị giật màn hình. Đây là thay đổi duy nhất chạm vào 
 
 **Không làm trong lần dựng này**: siết `/ext` Origin-check xuống đúng ID extension (cần pin
 `key` trong `manifest.json`); hàng đợi nhiều job cùng lúc; preset blur PII bắt buộc (mục 5.4).
+
+## 8. Ảnh trong bài KB là surface sống, không phải PNG
+
+**Vấn đề**: tab KB hiển thị `step.out` — file PNG đã render. Ảnh đó là ngõ cụt: người dùng sửa
+gì trong tab Snap cũng không dội về bài, muốn dời một callout đặt lệch thì phải dựng lại shot
+bên Snap hoặc ghim comment nhờ agent, và suốt lúc agent chạy job thì không thấy nó làm gì cho
+tới khi xong.
+
+**Quyết định**: bài viết vẽ **ảnh gốc (`step.src`) + `els` của step đó, sống**, bằng đúng bộ
+component và đúng surface mà tab Snap dùng. PNG trở lại đúng vai trò của nó — artifact mà
+markdown xuất bản trỏ tới — và có nút `Live | PNG` trên từng ảnh để đối chiếu hai bên.
+
+**Hai surface cho mỗi step, và chỗ chia đôi này là toàn bộ thiết kế:**
+
+- **Trong bài — chỉ xem.** Ảnh 2560px nhét vào nửa cột bài viết còn ~20%; ở cỡ đó không có cách
+  chỉnh grip nào biến nó thành chỗ kéo thả tử tế được. Nó là một **view sống**: hiện cả sửa đổi
+  chưa lưu lẫn thay đổi agent vừa ghi vào `job.json`, không cần render ở giữa.
+- **Trong modal — editor**, mở bằng cách bấm vào ảnh. Gần trọn cửa sổ, có zoom riêng (Fit /
+  100% / ±), palette component và panel Properties. Hai surface **dùng chung một object
+  `capture`**, nên cái modal sửa chính là cái bài đang hiện.
+
+(Bản dựng đầu cho sửa thẳng trong bài, toolbar + Properties nhét dưới mỗi ảnh. Bỏ vì đúng một lý
+do: ảnh quá nhỏ để thao tác. Cỡ ảnh là cỡ cột bài, không sửa được bằng CSS.)
+
+Bốn hệ quả kiến trúc:
+
+- **`src/surface.js`** — phần canvas (vẽ el, `makeCtx`, kéo/resize/vẽ-để-đặt, ⌫) tách khỏi
+  `editor.js` thành một factory dùng chung. Tách chứ không chép: phần drag có những chi tiết
+  không nhìn ra từ source mà lộ ngay trên màn hình (uốn cung arrow hai trục, snap góc elbow, sàn
+  chiều rộng pill "Step n" đo theo font, khoá tỉ lệ ảnh) — bản sao thứ hai sẽ trôi, rồi hai tab
+  bất đồng về việc "kéo" nghĩa là gì. `makeCtx`'s `$` phải **scoped** theo `propsRoot`, nếu
+  không `$('#pCompact')` trong panel KB sẽ bắt nhầm ô cùng id ở panel tab Snap đang ẩn.
+- **Toạ độ không rời hệ pixel của ảnh gốc.** Stage vẽ ở kích thước tự nhiên rồi `transform:
+  scale()` xuống bề ngang cột; `getZoom()` trả đúng hệ số đó cho surface. Đây là hệ mà
+  `job.json`, `props` của `snap_add` và pin đã resolve của `snap_comments` đều đang nói — không
+  đẻ thêm hệ toạ độ thứ hai phải giữ đồng bộ.
+- **Chỉ ảnh nằm trong `.kb-md-imgwrap`.** Pin comment định vị theo phần trăm của hộp đó và
+  handler click-để-ghim đo chính nó; thêm bất cứ thứ gì vào trong sẽ lệch mọi pin đã có. Nút
+  `Live | PNG` là anh em của nó, không phải con.
+- **CSS cấu trúc của stage KHÔNG được scope theo `.kb-article-preview`.** `buildStage()` dựng
+  cùng một cây DOM cho cả hai chỗ; scope nó vào tab KB làm `.kbs-scaler` trong modal mất mốc
+  `position: relative`, rơi về `.kbs-modal` rồi vẽ ảnh ở kích thước gốc đè kín cửa sổ. Bắt được
+  bằng một cú click không tới được nút zoom, không phải bằng đọc CSS.
+- **`--kbs-grip`**: mọi grip (handle, `.el-del`, `.arrow-end`, khung nét đứt) nhân ngược với hệ
+  số scale nên luôn đúng cỡ thiết kế trên màn hình. Nội dung thì scale, cái để cầm nội dung thì
+  không.
+- **`kb_job_save` không phải `snap_render_job`.** Chỉ render lại step nào thực sự đổi, và
+  **không** ghép lại markdown — dời một element thì không đổi tên file `out`, còn
+  `assembleMarkdown()` sẽ đè lên chữ người dùng tự gõ, vốn là nửa còn lại của cùng nút Save.
+
+**Chiều agent**: push một chiều `kb_article_changed` trên `/ext` (đúng khuôn `kb_progress`), bắn
+từ `snap_job` / `snap_render_job` / `snap_write_kb` / `snap_export`. Vì bài vẽ thẳng từ
+`job.json`, agent **không cần render** thì người dùng đã thấy element dịch chuyển — nên
+`.claude/skills/kb/SKILL.md` yêu cầu ghi `job.json` sau MỖI bước thay vì gom đến cuối. `slug`
+null nghĩa là "có gì đó dưới `kb/` đổi, bên ghi không nói được bài nào" (`snap_export` ghi một
+đường dẫn trần); UI đọc là "đọc lại bài đang mở". Bài đang có sửa đổi chưa lưu thì **không** bị
+đọc đè — toast bảo bấm Refresh, đúng luật `afterReviseFinish()` vẫn dùng.
+
+**Bài phẳng vẫn chạy như cũ**: không có `job.json`, hoặc ảnh gốc đã bị xoá → giữ nguyên PNG
+read-only. `readKbArticle()` giờ trả kèm `job` cả khi bài là `kb/<slug>.md` phẳng có thư mục
+`kb/<slug>/job.json` bên cạnh — đúng hình dạng của những bài đầu tiên tool này làm ra, mà trước
+đó UI không hề nhận được `els` của chúng.
+
+## 9. Panel "+ New job": preview ở trên, log ở dưới
+
+Trước đó nửa phải của panel New job chỉ có log. Log trả lời "agent đang làm gì"; nó không trả
+lời được câu người ta thực sự hỏi khi ngồi chờ — "nó làm ra cái gì rồi". Dòng
+`wrote img/02-search-typed-annotated.png` không thay được việc nhìn thấy bước 2 hiện lên.
+
+Nên panel chia đôi: **preview bài đang được dựng ở trên, log ở dưới** (grip kéo được, dùng
+chung `makeLogResizer()` với log của panel bài viết). Preview mở **ngay lúc bấm Start**, rỗng —
+đợi đến khi có cái để hiện mới mở nghĩa là panel tự đổi hình dạng giữa chừng.
+
+Ba điểm đáng ghi:
+
+- **Preview dựng từ `job.json`, không đợi markdown.** Agent ghi `job.json` sau mỗi bước chụp
+  (mục 8), còn markdown thì mãi cuối job mới ghép. Nên khi `kb_read` trả `md` rỗng, UI tự dựng
+  markdown tạm từ `job.json` bằng `jobToMarkdown()` — cố ý cùng hình dạng với
+  `assembleMarkdown()` bên server, để lúc file thật rơi xuống thì preview không nhảy layout.
+  Cộng với ảnh là surface sống, mỗi bước hiện ra **ngay khi chụp xong, không cần render PNG**.
+- **Job authoring không biết slug của chính nó** — bài viết là thứ nó sắp làm ra. Slug đến cùng
+  push `kb_article_changed` đầu tiên có tên bài; `noteJobSlug()` (kb-job.js) đóng dấu nó lên job
+  đang chạy để `kb_query` trả lại được, tức là reload trang giữa job vẫn tìm về đúng preview.
+- **Preview này chỉ xem, không sửa** — agent đang sở hữu file, sửa vào đó thì bước sau nó ghi đè.
+  Không có chip `✎ Edit`, bấm vào ảnh không mở modal. Xong job (hoặc bất cứ lúc nào) thì nút
+  `Open article →` đưa sang panel bài viết, nơi mới sửa được.
+
+Một cái bẫy: preview dùng chung class `.kb-article-preview` với panel bài viết (cùng renderer,
+cùng surface sống), nên `document.querySelectorAll('.kb-article-preview …')` từ giờ khớp **hai**
+chỗ. Trong code đã luôn query theo element (`articlePreview.querySelectorAll`), nhưng test thì
+phải đổi sang `#kbArticlePreview` — bắt được vì Playwright báo "resolved to 4 elements" rồi chờ
+mãi cái đầu tiên (nằm trong panel đang `hidden`) hiện ra.
+
+Và: khi panel New job bị ẩn (người dùng sang đọc bài khác giữa job), `refreshJobPreview()` bỏ
+qua luôn. Mount vào panel `display:none` thì `clientWidth` bằng 0, `fit()` rơi về kích thước tự
+nhiên và vẽ ảnh 2560px cho tới khi ResizeObserver sửa lại — một cú loé ảnh khổng lồ lúc quay
+lại, đổi lấy đúng con số không. `selectNewJob()` refresh bù ngay khi panel hiện lại.
+
+## 10. Agent vẽ trong tab KB, tab Snap trả về cho người dùng
+
+**Vấn đề**: `snap_open`/`snap_add`/`get_els` đi qua `callExtension()` xuống **canvas của tab
+Snap** (`bridge-editor.js`). Nghĩa là agent và người dùng dùng chung một chỗ làm việc:
+
+- `loadCapture()` push mỗi ảnh thành **một tab capture mới** trong session của người dùng
+  ([editor.js](src/editor.js) `loadCapture` → `captures.push(next)`), nên job 5 bước để lại 5 tab
+  lạ.
+- `finishCaptureSwap()` gọi `saveSessionNow()`, và hook `onMutate` của surface gọi
+  `scheduleSessionSave()` — tức mỗi ảnh 2560px của agent bị ghi đi ghi lại vào
+  `chrome.storage.local`, cho một thứ hoàn toàn tạm: artifact thật là `job.json` + PNG.
+- Và một toast `snap-bridge added <type>` cho **mỗi** `snap_add`, vốn là tín hiệu duy nhất báo
+  có gì đó đang xảy ra ở một view không ai nhìn.
+
+**Quyết định**: agent có canvas riêng, `mountAgent()` trong `kb-surface.js`, nằm ở khung trên
+cùng của panel New job. Cột phải giờ đọc từ trên xuống là **"đang làm gì / đã làm ra gì / nói
+gì"**: agent canvas — preview bài — log. Tab Snap không nhận gì từ agent nữa.
+
+- **Cùng một surface, cùng một modal.** Canvas trong khung là view chỉ-xem (khung cao bằng 1/3
+  cột — đúng lý do mục 8 nêu cho ảnh trong bài), bấm vào mở **đúng modal editor** của ảnh bài
+  viết. `openEditor()` giờ nhận `title`/`hint` ghi đè, vì cái này không phải một step nào cả.
+- **Sửa tay vẫn tính.** `get_els` đọc thẳng `capture.els` của canvas này, nên một callout người
+  dùng kéo lại trước khi agent gọi `snap_export` vẫn vào PNG — đúng tính chất cũ, chỉ đổi chỗ.
+- **`getAgent` phải resolve muộn.** `SnapKit.bridge.init()` chạy **trước** `SnapKit.kb.init()`
+  ở cuối `editor.js`, nên `bridge-editor.js` không thể giữ tham chiếu lúc wiring; nó gọi
+  `SnapKit.kb.agent()` tại thời điểm lệnh tới.
+- **Nút `→ Snap`.** Đường duy nhất còn lại để một capture của agent sang tab Snap, và chỉ khi
+  người dùng bấm. `els` được **dựng lại** với capture mới chứ không bê nguyên sang: blur và zoom
+  đọc pixel từ `capture.img.el`, một element mang theo tham chiếu sẽ vẫn đang lấy mẫu từ ảnh cũ.
+- **`cmdExport` giờ ném lỗi.** Đường export bằng `captureVisibleTab` đã không còn ai gọi từ hồi
+  `snap_export` chuyển sang render headless qua `get_els`; giờ agent không vẽ trên stage Snap
+  nữa thì nó sẽ chụp nhầm capture của người dùng. Từ chối to hơn là đoán.
+- Banner đổi lời: canvas Snap không còn "bị lái tự động".
+
+Kiểm bằng harness: `jobtest.mjs` giả luôn cả chiều `snap-bridge-cmd` (emit lệnh, bắt
+`snap-bridge-reply` theo `reqId`) nên `snap_open`/`snap_add`/`get_els`/`export` chạy thật qua
+`bridge-editor.js`, rồi khẳng định `#snapTabs` và `#canvas` **vẫn rỗng**.
+
+**Bố cục cuối**: canvas trái, bài phải, log dưới cả hai. Hai khung trên trả lời hai câu hỏi khác
+nhau về **cùng một thời điểm** — "đang làm gì" và "đã làm ra gì" — nên giá trị nằm ở chỗ đọc cái
+này đối chiếu cái kia; xếp dọc thì phải cuộn giữa chúng. `.kb-job-panes` dùng
+`grid-auto-flow: column` + `grid-auto-columns: 1fr` chứ không phải `1fr 1fr` cố định: khung bị ẩn
+là `display:none` nên **không còn là grid item**, khung còn lại tự chiếm trọn bề ngang thay vì
+ngồi cạnh một nửa trống.
+
+## 11. Bốn lỗi một job thật lôi ra (2026-08-30)
+
+Chạy quan sát một job thật (bài "dịch app Volume Discount", 3 bước, 16,5 phút) và đối chiếu mtime
+của `kb/` với code. Fixture chứng minh code chạy; job thật chứng minh **giả định** nào sai.
+
+**1. `slugFromKbRel("img/01-x-annotated.png")` trả `"img"`.** Mọi article của tool này để ảnh ở
+`kb/img/`, nên mỗi `snap_export` — kể cả 6 lần export thử — đẩy `kb_article_changed { slug: "img" }`,
+một bài không tồn tại. UI adopt nó rồi chỉ có thể đọc lỗi; tệ hơn, `noteJobSlug("img")` đóng dấu
+**vĩnh viễn** lên job đang chạy (nó chỉ ghi khi còn trống), nên reload trang giữa job quay về đúng
+chỗ không có gì. Sửa: chỉ trả slug khi có bài thật trên đĩa (`kb/<slug>.md` hoặc
+`kb/<slug>/job.json`) — đúng cái `null` mà comment của `snap_export` vốn đã hứa.
+
+**2. Job báo fail dù bài đã ghi xong.** `_wroteKb` chỉ đếm `mcp__snap__snap_write_kb`, trong khi
+skill **khuyến nghị** đường `job.json` + `snap_render_job` cho bài nhiều bước — và chính
+`snap_render_job` gọi `assembleMarkdown()` rồi ghi `.md`. Làm đúng skill thì luôn nhận
+"The session finished without ever calling snap_write_kb", với bài và 3 PNG nằm sẵn trong `kb/`.
+Đổi thành `_wroteArticle`, đếm cả hai tool.
+
+**3. `snap_job` nhận `els` sai shape mà không nói gì.** Job đó ghi `job.json` đầu tiên với els
+**phẳng** (`{type, x, y, w, h}`) thay vì `{type, props}`. `render.mjs` truyền `props: el.props || {}`
+và `render.add()` làm `Object.assign(el, {})`, nên **mọi** annotation render ở vị trí mặc định của
+component — đo được: label ra `1280,625` chữ `"Label"` thay vì `230,470` "Bước 1: Mở Translations".
+`toElements()` của KB Studio đọc `el.props` y hệt, nên preview khớp với PNG và **không cái nào nói
+tại sao**. Agent mất ~70 giây và hai lượt render đầy đủ để tự phát hiện. Giờ `assertElShapes()`
+từ chối tại chỗ ghi, kèm object đã sửa sẵn để chép.
+
+**4. Luật "ghi `job.json` sau MỖI bước" nằm ở mục 7.** Vòng lặp thật của agent là 3→4→5→6 lặp cho
+từng bước, mục 7 chỉ tới sau khi mọi thứ đã chụp xong — tức agent chỉ đọc luật sau khi đã làm xong
+đúng cái việc luật muốn đổi. Đo được: `job.json` đầu tiên rơi xuống ở phút 15/16,5, **92% chặng
+đường**, nên khung preview trống suốt phần làm việc của job. Chuyển thành mục **6b**, ngay sau
+"xuất và kiểm tra bằng mắt"; mục 7 còn lại một dòng trỏ ngược.
+
+Ba trong bốn lỗi này không fixture nào bắt được, vì cả ba đều là giả định về **hành vi của agent
+và hình dạng đường dẫn thật**, không phải về code. Cái rẻ nhất để lặp lại:
+[`snap-bridge/watch-kb.mjs`](snap-bridge/watch-kb.mjs) — poll `kb/` 4 giây một lần và log mọi thay
+đổi kèm timestamp cùng tóm tắt `job.json`, không đụng `/ext` nên không cướp socket của extension.
+
+### Lỗi thứ năm, và nó là lỗi của harness
+
+Ngay sau đó: **mọi ảnh trong mọi bài KB đều không hiện.** Trong khi cả 5 harness đều xanh, kể cả
+một cái mở đúng bài vừa dựng ra.
+
+Nguyên nhân: `toKbRel()` trả `"kb/" + đường dẫn`, nên `mdRel` thật là **`kb/<slug>.md`**. Còn
+`kb_read_image` thì resolve `relPath` **so với `kb/` sẵn rồi**. Khi tôi đổi `resolveImagePath` từ
+suy ra theo `articleKind` sang đọc `mdRel` (để lo trường hợp bài chưa có markdown giữa job), phần
+tiền tố đó không được cắt — mọi ảnh đi hỏi `kb/kb/img/...` và hỏng sạch.
+
+Harness không bắt được vì nó **không gọi bridge thật**: nó tự bịa reply, và bịa `mdRel` là
+`"<slug>.md"` — cái shape tôi *tưởng*, không phải cái bridge *gửi*. Một stub sai thì mọi assertion
+dựng trên nó đều vô nghĩa, và càng nhiều assertion càng tự tin nhầm.
+
+Hai việc đã làm, và việc thứ hai mới là việc đáng kể:
+
+1. `mdDirOf()` cắt tiền tố `kb/`.
+2. **Chốt contract ở `servertest.mjs`** — nó nói chuyện với server thật, nên `mdRel` được assert ở
+   đúng đó cho cả bài phẳng lẫn bài thư mục. Stub của các harness UI giờ chép đúng shape ấy; shape
+   đổi thì `servertest` gãy trước và chỉ thẳng vào chỗ phải sửa.
+
+Đã soát lại mọi field khác các stub bịa ra (`read_image` → `{dataUrl}`, `comments_list` →
+`{comments}`, `session` → `{hasSession, turns}`, `job_save` → `{savedRel, rendered, warn}`,
+`list` → `{items}`) đối chiếu handler thật: chỉ `mdRel` sai.

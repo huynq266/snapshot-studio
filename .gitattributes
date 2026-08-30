@@ -1,0 +1,9 @@
+# Shell scripts giữ LF bất kể core.autocrlf của từng người đặt gì.
+#
+# snap-bridge/native-host/install.sh được commit với bit thực thi (100755) để
+# người dùng macOS/Linux clone về là chạy được ngay. Bit đó vô nghĩa nếu file
+# tới tay họ với CRLF: kernel đọc dòng shebang kèm ký tự CR và báo
+# "bad interpreter: /bin/sh^M". Hiện repo chỉ đúng vì máy commit đang để
+# core.autocrlf=true — dòng dưới làm điều đó không còn phụ thuộc vào cấu hình
+# của bất kỳ ai.
+*.sh text eol=lf

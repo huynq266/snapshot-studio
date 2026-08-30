@@ -62,6 +62,17 @@ deliberate cut, not an oversight — see "What this is NOT" below.
    dark ground, or your live capture — and **+ New component** to author a new one.
    Anything you make there shows up in the Snap rail under **Yours**.
 
+## The KB tab needs one more setup pass
+
+Everything above works from **Load unpacked** alone. The **KB** tab does not: it is served by
+`snap-bridge`, a separate node process, and reaching it takes a `npm install`, a native
+messaging host so the tab's **▶ Start bridge** button can launch that process, and a reload.
+
+[KB-SETUP.md](KB-SETUP.md) walks through it — written so you can hand it to Claude Code in
+this repo ("read `KB-SETUP.md` and set up the KB tab on this machine") and let it do the
+parts that aren't `chrome://extensions` clicks. [KB-BRIDGE.md](KB-BRIDGE.md) is the design
+behind it, which you don't need in order to set it up.
+
 ## How export actually works (read this before debugging a blank/cut-off PNG)
 
 `chrome.tabs.captureVisibleTab` is doing the real work, not a canvas redraw. That's not

@@ -1,7 +1,7 @@
 /* kb-job.js — spawns a Claude Agent SDK session that reads a user
    instruction (with an optional reference .md attached), drives Chrome
    Bridge + this process's own mcp__snap__* tools, and writes the final KB
-   article via snap_write_kb. This is topology B: the spawned session is
+   article via snap_write_kb or snap_render_job. This is topology B: the spawned session is
    just a second MCP client hitting the same /mcp endpoint topology A
    already proved works — see KB-BRIDGE.md mục 7 for the original design
    writeup, and the "instruction + session tabs" and "agent opens its own
@@ -173,8 +173,20 @@ export function getCurrentJob() {
   return currentJob ? publicView(currentJob) : null;
 }
 function publicView(job) {
-  const { id, status, startedAt, endedAt, mdFilename, instruction, sessionTabs, log, resultPath, error } = job;
-  return { id, status, startedAt, endedAt, mdFilename, instruction, sessionTabs, log, resultPath, error };
+  const { id, mode, slug, status, startedAt, endedAt, mdFilename, instruction, sessionTabs, log, resultPath, error } = job;
+  return { id, mode, slug, status, startedAt, endedAt, mdFilename, instruction, sessionTabs, log, resultPath, error };
+}
+
+/** An agent working an AUTHORING job just wrote to kb/<slug>. That job could
+ *  not be told its slug when it started — the article is the thing it is going
+ *  to make — so stamp it the first time a write names one. kb_query then hands
+ *  it back, which is what lets KB Studio find its way to the live preview again
+ *  after the editor page is reloaded mid-job. A revise job already knows its
+ *  slug and must not have it moved out from under it. */
+export function noteJobSlug(slug) {
+  if (!slug || !currentJob || currentJob.status !== "running") return;
+  if (currentJob.mode !== "author" || currentJob.slug) return;
+  currentJob.slug = slug;
 }
 
 /** Starts a KB job. onProgress(line) is called for every log line pushed —
@@ -182,25 +194,37 @@ function publicView(job) {
  *  decides what to do with it. Throws synchronously if a job is already
  *  running or Chrome Bridge cannot be found — both are caller-visible
  *  errors, not job-state errors, since no job object exists yet. */
-export function startJob({ instruction, markdown, mdFilename, sessionTabs, onProgress, snapSelf }) {
+export function startJob({ mode, slug, context, instruction, markdown, mdFilename, sessionTabs, onProgress, snapSelf }) {
   if (currentJob && currentJob.status === "running") {
     throw new Error("a KB job is already running — wait for it to finish or cancel it first.");
   }
   if (!instruction || !instruction.trim()) throw new Error("instruction is empty.");
-  if (!Array.isArray(sessionTabs) || !sessionTabs.length) throw new Error("at least one session tab is required — add one before starting.");
-  for (const t of sessionTabs) {
-    if (t == null || typeof t.id !== "number") throw new Error("each session tab needs a numeric id.");
+
+  // Two job kinds, and the checks differ because the JOBS differ, not for
+  // convenience: a revise job never opens a browser, so requiring session
+  // tabs and a working Chrome Bridge would block the one kind of job that
+  // does not need either. See the revise-mode block at the bottom of this file.
+  const revise = mode === "revise";
+  if (revise) {
+    if (!slug || typeof slug !== "string") throw new Error("a revise job needs the slug of the article it is revising.");
+  } else {
+    if (!Array.isArray(sessionTabs) || !sessionTabs.length) throw new Error("at least one session tab is required — add one before starting.");
+    for (const t of sessionTabs) {
+      if (t == null || typeof t.id !== "number") throw new Error("each session tab needs a numeric id.");
+    }
   }
 
-  const chromeCfg = loadChromeBridgeConfig();
-  if (!chromeCfg.ok) throw new Error(`Cannot start a KB job: ${chromeCfg.reason}`);
+  const chromeCfg = revise ? null : loadChromeBridgeConfig();
+  if (chromeCfg && !chromeCfg.ok) throw new Error(`Cannot start a KB job: ${chromeCfg.reason}`);
   if (!snapSelf || !snapSelf.url || !snapSelf.token) throw new Error("snapSelf {url, token} is required — the bridge's own MCP endpoint for the spawned session to call.");
 
   const id = randomUUID();
   const job = {
-    id, status: "running", startedAt: Date.now(), endedAt: null,
-    mdFilename: mdFilename || null, instruction, sessionTabs, log: [], resultPath: null, error: null,
-    _query: null, _wroteKb: false,
+    id, mode: revise ? "revise" : "author", slug: slug || null, context: context || null,
+    status: "running", startedAt: Date.now(), endedAt: null,
+    mdFilename: mdFilename || null, instruction, sessionTabs: revise ? [] : sessionTabs,
+    log: [], resultPath: null, error: null,
+    _query: null, _wroteArticle: false,
   };
   currentJob = job;
 
@@ -210,9 +234,14 @@ export function startJob({ instruction, markdown, mdFilename, sessionTabs, onPro
     try { onProgress && onProgress(line); } catch {}
   };
 
-  push(`Starting KB job — ${sessionTabs.length} session tab(s), spec ${mdFilename || "(none)"}.`);
+  push(revise
+    ? `Revising "${slug}" — no browser, kb/ files only.`
+    : `Starting KB job — ${sessionTabs.length} session tab(s), spec ${mdFilename || "(none)"}.`);
 
-  runJob(job, instruction, markdown, sessionTabs, chromeCfg, snapSelf, push).catch((e) => {
+  const run = revise
+    ? runReviseJob(job, instruction, snapSelf, push)
+    : runJob(job, instruction, markdown, sessionTabs, chromeCfg, snapSelf, push);
+  run.catch((e) => {
     job.status = "error";
     job.error = String((e && e.message) || e);
     job.endedAt = Date.now();
@@ -316,20 +345,42 @@ async function runJob(job, instruction, markdown, sessionTabs, chromeCfg, snapSe
   });
   job._query = q;
 
-  // tool_use ids of this job's OWN mcp__chrome__navigate calls, so the
-  // matching tool_result (a "user"-role message, per the SDK's stream —
-  // canUseTool never sees it) can be picked out from every other tool
-  // result streaming past and used to learn currentTabId above.
+  await consumeStream(q, job, push, {
+    requireWrite: true,
+    onTabId: (id) => { currentTabId = id; push(`(this job's tab is now ${currentTabId})`); },
+  });
+}
+
+/** The message loop, shared by both job kinds. Everything that differs
+ *  between an authoring job (browser; must end with an article written) and
+ *  a revise job (no browser; may legitimately end having only answered) is
+ *  in opts rather than in a second copy of this loop.
+ *
+ *  opts.onTabId is wired for authoring only: canUseTool sees call INPUTS and
+ *  never results, so the tabId Chrome Bridge assigned can only be learned
+ *  here, off the navigate tool_result (a "user"-role message) streaming past. */
+async function consumeStream(q, job, push, opts = {}) {
   const pendingNavigateIds = new Set();
   for await (const msg of q) {
     if (job.status === "cancelled") break;
+    // Every message in the stream carries session_id, so take it off the first
+    // one that arrives rather than matching one particular init message — that
+    // shape belongs to the SDK and can change under us; this cannot.
+    if (opts.onSessionId && msg && msg.session_id) opts.onSessionId(msg.session_id);
     if (msg.type === "assistant" && msg.message && Array.isArray(msg.message.content)) {
       for (const block of msg.message.content) {
         if (block.type === "text" && block.text.trim()) push(block.text.trim());
         else if (block.type === "tool_use") {
           push(`→ ${block.name}(${summarizeInput(block.input)})`);
-          if (block.name === "mcp__snap__snap_write_kb") job._wroteKb = true;
-          if (block.name === "mcp__chrome__navigate") pendingNavigateIds.add(block.id);
+          // Both tools write an article's markdown, and for a multi-step
+          // article the skill RECOMMENDS the second one: job.json +
+          // snap_render_job, which calls assembleMarkdown() and writes the .md
+          // itself. Counting only snap_write_kb meant a job that followed the
+          // skill correctly, and left a finished article on disk, still reported
+          // "no article was written" — seen on a real job, whose .md and three
+          // PNGs were all sitting in kb/ when it said so.
+          if (block.name === "mcp__snap__snap_write_kb" || block.name === "mcp__snap__snap_render_job") job._wroteArticle = true;
+          if (opts.onTabId && block.name === "mcp__chrome__navigate") pendingNavigateIds.add(block.id);
         }
       }
     } else if (msg.type === "user" && msg.message && Array.isArray(msg.message.content)) {
@@ -337,17 +388,14 @@ async function runJob(job, instruction, markdown, sessionTabs, chromeCfg, snapSe
         if (block.type === "tool_result" && pendingNavigateIds.has(block.tool_use_id)) {
           pendingNavigateIds.delete(block.tool_use_id);
           const tabId = extractTabId(block.content);
-          if (tabId != null) {
-            currentTabId = tabId;
-            push(`(this job's tab is now ${currentTabId})`);
-          }
+          if (tabId != null) opts.onTabId(tabId);
         }
       }
     } else if (msg.type === "result") {
       if (msg.subtype === "success") {
-        if (!job._wroteKb) {
+        if (opts.requireWrite && !job._wroteArticle) {
           job.status = "error";
-          job.error = "The session finished without ever calling snap_write_kb — no article was written.";
+          job.error = "The session finished without writing an article — neither snap_write_kb nor snap_render_job was called.";
         } else {
           job.status = "done";
         }
@@ -356,7 +404,7 @@ async function runJob(job, instruction, markdown, sessionTabs, chromeCfg, snapSe
         job.error = `Session ended: ${msg.subtype}${msg.errors && msg.errors.length ? " — " + msg.errors.join("; ") : ""}`;
       }
       job.endedAt = Date.now();
-      push(job.status === "done" ? "Job finished — article written." : `Job failed: ${job.error}`);
+      push(job.status === "done" ? (opts.doneLine || "Job finished — article written.") : `Job failed: ${job.error}`);
     }
   }
   if (job.status === "running") { job.status = "error"; job.error = "stream ended with no result message."; job.endedAt = Date.now(); }
@@ -387,4 +435,174 @@ function extractTabId(content) {
   } catch {}
   const m = /"?tabId"?\s*[:=]\s*(\d+)/.exec(text);
   return m ? Number(m[1]) : null;
+}
+/* ---------------------------------------------------------------------
+   Revise mode — the prompt box in KB Studio's article panel. The user types
+   at an article that already EXISTS instead of asking for a new one, so this
+   is deliberately a SMALLER job than authoring rather than the same one with
+   a different prompt:
+
+     - no browser at all. The chrome MCP server is not attached and every
+       non-snap tool is denied, so a job started from a text box can never
+       navigate the user's logged-in session or click around the live app.
+       That also means it needs no session tabs and no Chrome Bridge, and it
+       runs when the browser side is not set up at all.
+     - success is not "wrote an article". A revise job that reads the pins and
+       answers "step 3's target was never in frame, re-shoot it" did exactly
+       its job while writing nothing — so no _wroteArticle requirement.
+
+   What it CAN do is the whole fix loop, all of it off files already on disk:
+   snap_comments -> snap_job -> snap_render_job (or snap_open/snap_add/
+   snap_export for an article with no job.json) -> snap_view ->
+   snap_comment_resolve -> snap_learn.
+   --------------------------------------------------------------------- */
+function buildReviseSystemPrompt() {
+  return [
+    "You are revising ONE Knowledge Base article that already exists in this repo. The user typed the instruction below into KB Studio while looking at that article.",
+    "",
+    "HARD CONSTRAINT — this job has NO browser. You cannot navigate, click, scroll, or take a new screenshot: those tools are not attached and every call to one is denied. You work from the captures already on disk under kb/.",
+    "",
+    "If the fix genuinely needs a new screenshot — the app changed, the target was never in frame, the state in the image is wrong (PLACEMENT_PLAYBOOK #2) — STOP and say so plainly, naming the step and what has to be captured. The user then starts a capture job from \"+ New job\" with the right tabs open. Do NOT paper over it by moving an annotation onto something that is not in the image.",
+    "",
+    "Your tools, and the loop they make:",
+    "- snap_comments — the pins the user placed on the images, already resolved to real pixels in the base capture's coordinate space, with the owning step and the nearest elements.",
+    "- snap_job — read the article's job.json, change a step's els, write the whole object back.",
+    "- snap_render_job — re-render every image AND the markdown from job.json. Seconds, no browser.",
+    "- snap_open / snap_kit / snap_add / snap_export — annotate a capture directly, for an article with no job.json. snap_add's \"at\" mode reads a live tab and is denied here: pass explicit x/y props instead, which is exactly what snap_comments hands you.",
+    "  The editor these four drive is SHARED and it is not yours: it still holds whatever the last session (or the user's own hands) left in it. ALWAYS snap_open first — exporting without it renders someone else's leftover elements onto your file, and each session starts with no memory of what the previous one staged.",
+    "- snap_view — LOOK at a PNG. Mandatory before you claim anything is fixed.",
+    "- snap_write_kb with overwrite:true — rewrite the article markdown. For a job.json article the markdown is GENERATED: edit job.json and re-render instead, or your text is overwritten on the next render.",
+    "- snap_comment_resolve — close a pin with a note saying what you changed. Only the ones you actually fixed; say out loud which ones you left open and why.",
+    "- snap_learn — append a LEARNING to the placement playbook when a correction taught something the next article should not have to relearn.",
+    "",
+    readSkillFiles(),
+  ].join("\n");
+}
+
+function buildRevisePrompt(instruction, ctx, isFollowUp) {
+  const parts = isFollowUp
+    // Resumed session: it already has the whole previous turn, so re-stating
+    // the task would only compete with what it remembers. What it CANNOT know
+    // is what changed on disk since — its own writes landed, the user may have
+    // edited or resolved something — so that part is repeated every turn.
+    ? ["Follow-up from the user in the same session:", "", instruction, "",
+       "The state below is re-read from disk just now — trust it over your memory of it where they disagree.", ""]
+    : ["Instruction from the user:", "", instruction, ""];
+  if (ctx) {
+    parts.push(
+      `Article: "${ctx.slug}" — ${ctx.kind === "job"
+        ? "job kind: job.json is the source of truth and the markdown is generated from it"
+        : "flat single-file kind: there is no job.json, the markdown below IS the article"}. Markdown lives at ${ctx.mdRel}.`,
+      ""
+    );
+    const pins = (ctx.comments && ctx.comments.comments) || [];
+    if (pins.length) {
+      parts.push(
+        `Open pinned comments (${pins.length}) — coordinates are already in the base capture's pixel space. Re-read them any time with snap_comments:`,
+        "",
+        "```json",
+        JSON.stringify(pins, null, 2),
+        "```",
+        ""
+      );
+    } else {
+      parts.push("There are no open pinned comments on this article — work from the instruction alone.", "");
+    }
+    if (ctx.md) parts.push("Current article markdown:", "", "--- BEGIN ARTICLE ---", ctx.md, "--- END ARTICLE ---", "");
+  }
+  parts.push("Do the work now. Look at every image you change before you report anything.");
+  return parts.join("\n");
+}
+
+/* One conversation per ARTICLE, not one per Send. Typing a second prompt
+   continues the same agent session (options.resume), so "move it a bit further
+   right" means something — the previous turn is in its context, not just its
+   consequences on disk. Keyed by slug and held in memory only: the CLI owns the
+   real transcript, this is just the pointer to it, and losing it on a bridge
+   restart costs a fresh session, not data.
+
+   The UI's "New session" button clears the entry; the next prompt then starts
+   clean. That is a real need, not a nicety — a session that has gone down a
+   wrong path is cheaper to abandon than to argue out of. */
+const reviseSessions = new Map();   // slug -> { id, turns, updatedAt }
+
+export function getReviseSession(slug) {
+  const e = reviseSessions.get(slug);
+  return e ? { hasSession: true, turns: e.turns, updatedAt: e.updatedAt } : { hasSession: false, turns: 0 };
+}
+export function resetReviseSession(slug) {
+  const had = reviseSessions.delete(slug);
+  return { cleared: had };
+}
+
+async function runReviseJob(job, instruction, snapSelf, push) {
+  async function canUseTool(toolName, input) {
+    if (!toolName.startsWith("mcp__snap__")) {
+      push(`Denied ${toolName} — a revise job has no browser and no filesystem.`);
+      return {
+        behavior: "deny",
+        message: `"${toolName}" is not available in a revise job: no browser, no filesystem. Work from what is already in kb/ with the mcp__snap__* tools, or stop and report that a fresh capture is needed.`,
+      };
+    }
+    // Anything that reads a LIVE tab is meaningless here — there is no tab.
+    // Spelling out the alternative matters more than usual: the skill files
+    // in the system prompt teach the "at" selector flow, which is the right
+    // answer in an authoring job and impossible in this one.
+    if (SNAP_TAB_TOOLS.has(toolName) || (toolName === "mcp__snap__snap_add" && input && input.at)) {
+      push(`Denied ${toolName} — it reads a live browser tab, which this job does not have.`);
+      return {
+        behavior: "deny",
+        message: `${toolName} reads a live browser tab and this job has none. For snap_add, pass explicit x/y props instead of "at" — snap_comments gives you the pin's coordinates in exactly that space. If the article really does need a fresh capture, stop and say so.`,
+      };
+    }
+    return { behavior: "allow" };
+  }
+
+  const prior = reviseSessions.get(job.slug);
+  const resume = prior ? prior.id : null;
+  push(resume
+    ? `Continuing the session on "${job.slug}" — turn ${prior.turns + 1}.`
+    : `New session on "${job.slug}".`);
+
+  const q = query({
+    prompt: singleUserMessage(buildRevisePrompt(instruction, job.context, !!resume)),
+    options: {
+      model: "claude-sonnet-5",
+      cwd: REPO_ROOT,
+      tools: [],
+      systemPrompt: buildReviseSystemPrompt(),
+      mcpServers: {
+        snap: { type: "http", url: snapSelf.url, headers: { Authorization: `Bearer ${snapSelf.token}` } },
+      },
+      allowedTools: [],
+      permissionMode: "default",
+      canUseTool,
+      ...(resume ? { resume } : {}),
+    },
+  });
+  job._query = q;
+
+  // Count the turn once, on the first message that names the session — not per
+  // message, and not up front either: a start that fails before the CLI answers
+  // should not leave a session id pointing at a conversation that never began.
+  let counted = false;
+  const onSessionId = (id) => {
+    if (counted) { reviseSessions.set(job.slug, { ...reviseSessions.get(job.slug), id }); return; }
+    counted = true;
+    const before = reviseSessions.get(job.slug);
+    reviseSessions.set(job.slug, { id, turns: (before ? before.turns : 0) + 1, updatedAt: Date.now() });
+  };
+
+  try {
+    await consumeStream(q, job, push, { doneLine: "Job finished — revision done.", onSessionId });
+  } catch (e) {
+    // A stored id can go stale (CLI session pruned, machine reimaged). Clear it
+    // and say so plainly rather than leaving the user pressing Send into the
+    // same wall — the next prompt then starts a fresh conversation.
+    if (resume) {
+      reviseSessions.delete(job.slug);
+      throw new Error(`could not continue the previous session (${e.message}) — it has been cleared, press Send again to start a fresh one.`);
+    }
+    throw e;
+  }
 }

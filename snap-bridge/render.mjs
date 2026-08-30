@@ -15,6 +15,7 @@
    với spec.json = { steps: [{ src, out, els: [{type, props}] }], scale? }
    `src` / `out` là đường dẫn tương đối so với kb/.  */
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import childProcess from "node:child_process";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -39,10 +40,45 @@ const EDITOR_URL = pathToFileURL(path.join(REPO_ROOT, "src", "editor.html")).hre
  *                          thật lần chạy đầu.
  *  @returns [{ out, width, height }]
  */
+/** Chạy fn() với child_process.spawn bị ép windowsHide — rồi trả lại nguyên trạng.
+ *
+ *  Vì sao cần: `chrome-headless-shell.exe` là binary **console subsystem**, và
+ *  launchProcess() của playwright-core dựng spawnOptions KHÔNG có `windowsHide`
+ *  (chỉ có detached cho non-win32). server.js lại được native host spawn detached,
+ *  không thừa kế console nào — nên Windows cấp cho headless shell một console mới,
+ *  kéo theo conhost.exe và **một cửa sổ Windows Terminal nhảy lên** mỗi lần render.
+ *  Đo được trực tiếp: chrome-headless-shell.exe, conhost.exe, OpenConsole.exe và
+ *  WindowsTerminal.exe sinh ra trong cùng 3 mili-giây ngay khi `snap_export` chạy.
+ *
+ *  `windowsHide: true` = cờ CREATE_NO_WINDOW: tiến trình vẫn có console, chỉ là
+ *  console không có cửa sổ. Playwright nói chuyện với browser qua
+ *  `--remote-debugging-pipe` (fd 3/4), không qua console, nên cờ này không đụng gì
+ *  tới đường điều khiển.
+ *
+ *  Vá bằng monkey-patch vì Playwright không hở tuỳ chọn spawn nào ra API công khai.
+ *  Phạm vi hẹp nhất có thể: chỉ bọc đúng lời gọi launch(), rồi khôi phục trong
+ *  finally — không để lại patch toàn cục cho phần còn lại của tiến trình. Không
+ *  phải no-op trên Linux/macOS thì Node bỏ qua cờ này, nên không cần rẽ nhánh
+ *  theo platform.
+ *
+ *  Đường còn lại là `channel: "chromium"` (dùng bản Chromium đầy đủ, chrome.exe
+ *  là GUI subsystem nên không cấp console). Không chọn: nó đổi hẳn build trình
+ *  duyệt đang render ảnh KB, tức đổi cả kết quả render — cái giá quá lớn cho một
+ *  cửa sổ console. */
+async function withHiddenConsole(fn) {
+  const origSpawn = childProcess.spawn;
+  childProcess.spawn = function (cmd, args, opts) {
+    if (opts && typeof opts === "object" && !Array.isArray(opts)) opts = { ...opts, windowsHide: true };
+    return origSpawn.call(this, cmd, args, opts);
+  };
+  try { return await fn(); }
+  finally { childProcess.spawn = origSpawn; }
+}
+
 export async function renderSteps(steps, opts = {}) {
   const scale = opts.scale || 2;
   const pw = await import("playwright");
-  const browser = await pw.chromium.launch();
+  const browser = await withHiddenConsole(() => pw.chromium.launch());
   const results = [];
   const pageErrors = [];
   try {

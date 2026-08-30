@@ -42,7 +42,7 @@
       <button class="vtab" data-view="lab">Components</button>
       <button class="vtab" data-view="kb">KB</button>
     </nav>
-    <div class="kb-banner" id="kbBanner" hidden>⚙ KB job running — the Snap canvas is being driven automatically.</div>
+    <div class="kb-banner" id="kbBanner" hidden>⚙ KB job running — the agent is drawing on its own canvas in the KB tab.</div>
     <div class="spacer"></div>
     <div class="tb-actions" data-for="snap" id="snapActions">
       <label class="stamp-toggle"><input type="checkbox" id="frameToggle"> Image frame</label>
@@ -68,8 +68,10 @@
     </div>
     <div class="tb-actions" data-for="kb">
       <span class="tb-note" id="kbStatusNote">No job running</span>
+      <!-- Stop stays in the toolbar on purpose: a job keeps running while you
+           click through to an article, and it has to be cancellable from there
+           too. Start moved into the New job form — see .kb-new-job-form below. -->
       <button id="kbStopBtn" class="btn sm" hidden>■ Stop</button>
-      <button id="kbStartBtn" class="btn primary" disabled>▶ Start</button>
     </div>
   </header>
 
@@ -239,6 +241,15 @@
   <main class="kb">
     <aside class="kb-rail">
       <h3>Articles</h3>
+      <!-- Shown only while the snap-bridge process is down. The list below is
+           served by that process, so without it this rail is empty for a
+           reason nobody could guess from an empty rail — see bridge-kb.js. -->
+      <div class="kb-offline" id="kbBridgeOffline" hidden>
+        <p class="kb-offline-title">snap-bridge isn't running</p>
+        <p class="kb-offline-body">Your articles are still on disk in <code>kb/</code> — this list is served by the bridge process, and it doesn't come back on its own after a restart.</p>
+        <button class="btn sm block" id="kbBridgeStart" type="button">▶ Start bridge</button>
+        <div class="kb-offline-hint" id="kbBridgeHint" hidden></div>
+      </div>
       <ul class="kb-jobboard">
         <li class="kb-jobboard-new" id="kbJobBoardNew" data-selected="true">+ New job</li>
       </ul>
@@ -247,6 +258,9 @@
     <div class="kb-main">
       <div class="kb-new-job-panel" id="kbNewJobPanel">
         <aside class="kb-rail kb-new-job-form">
+          <!-- Start belongs to this form, not the toolbar: it only ever acts on
+               the instruction + session tabs typed right below it. -->
+          <button id="kbStartBtn" class="btn primary block kb-start-job" disabled>▶ Start job</button>
           <h3>Instruction</h3>
           <textarea id="kbInstructionInput" class="kb-textarea" rows="5" placeholder="e.g. Viết bài KB hướng dẫn bật tính năng X, dùng các tab đã mở bên dưới."></textarea>
           <p class="empty-hint">Required — tells the agent what article to write. The reference doc below is optional background, not the source of truth.</p>
@@ -266,8 +280,43 @@
             <ul class="kb-session-list" id="kbSessionCandidateList"><li class="empty-hint">Click refresh to list open tabs.</li></ul>
           </div>
         </aside>
-        <div class="kb-log-wrap">
-          <div class="kb-log" id="kbLog"><p class="empty-hint">Write an instruction and add at least one session tab, then hit Start. Progress from the agent — what it navigates to, what it annotates, what it writes — appears here as it happens.</p></div>
+        <div class="kb-log-wrap" id="kbLogWrap">
+          <!-- Canvas and article side by side, log across the bottom. The two
+               top panes answer different questions about the SAME moment —
+               "what is it doing right now" on the left, "what has it made so
+               far" on the right — so the value is in reading one against the
+               other; stacked, you scrolled between them instead. Both are
+               hidden until a job starts: with nothing running there is nothing
+               to show. See bridge-kb.js's job-preview section. -->
+          <div class="kb-job-panes" id="kbJobPanes">
+            <!-- Left: the agent's own canvas. snap_open/snap_add used to land on
+                 the Snap tab's canvas, which left the user's workspace full of
+                 the agent's captures; it draws here instead, and the Snap tab
+                 holds nothing but what the user put there. This is the step IN
+                 FLIGHT — the finished ones are on the right, drawn from
+                 job.json. See mountAgent() in kb-surface.js. -->
+            <div class="kb-agent-wrap" id="kbAgentWrap" hidden>
+              <div class="kb-job-preview-head">
+                <span class="kb-job-preview-title" id="kbAgentTitle"></span>
+                <button id="kbAgentToSnap" class="btn sm" type="button" hidden title="Copy this capture and its annotations into the Snap tab as a new capture of your own">→ Snap</button>
+              </div>
+              <div class="kb-agent-canvas" id="kbAgentCanvas"></div>
+            </div>
+            <!-- Right: the article being built, from kb/<slug>/job.json — which
+                 the agent writes after every captured step — so it fills in long
+                 before any markdown exists. -->
+            <div class="kb-job-preview-wrap" id="kbJobPreviewWrap" hidden>
+              <div class="kb-job-preview-head">
+                <span class="kb-job-preview-title" id="kbJobPreviewTitle"></span>
+                <button id="kbJobPreviewOpen" class="btn sm" type="button" hidden title="Open this article in the editor">Open article →</button>
+              </div>
+              <div class="kb-article-preview kb-job-preview" id="kbJobPreview"></div>
+            </div>
+          </div>
+          <div class="kb-job-log-wrap" id="kbJobLogWrap">
+            <div class="kb-log-grip" id="kbLogResize" title="Drag up to make the log taller" hidden>≡</div>
+            <div class="kb-log" id="kbLog"><p class="empty-hint">Write an instruction and add at least one session tab, then hit Start. Progress from the agent — what it navigates to, what it annotates, what it writes — appears here as it happens.</p></div>
+          </div>
         </div>
       </div>
       <div class="kb-article-panel" id="kbArticlePanel" hidden>
@@ -290,6 +339,25 @@
           <textarea class="kb-article-editor" id="kbArticleEditor" spellcheck="false"></textarea>
           <div class="kb-article-preview" id="kbArticlePreview"></div>
         </div>
+        <!-- Prompt an agent at THIS article. No session tabs and no browser:
+             a revise job works from the captures already in kb/ (kb-job.js). -->
+        <div class="kb-article-prompt">
+          <div class="kb-article-prompt-row">
+            <textarea id="kbArticlePrompt" class="kb-textarea" rows="2" placeholder="Ask the agent to fix this article — e.g. &quot;fix the open comments&quot;. It works from the captures already on disk: no browser, no new screenshots."></textarea>
+            <div class="kb-article-prompt-actions">
+              <span class="kb-article-session" id="kbArticleSession"></span>
+              <button id="kbArticleNewSession" class="btn sm" type="button" disabled title="Forget the conversation so far — the next prompt starts a fresh agent session">⟲ New session</button>
+              <button id="kbArticleSend" class="btn primary" type="button" disabled>▶ Send</button>
+            </div>
+          </div>
+          <!-- Below the prompt: the reply belongs under what you typed. The
+               grip is on the TOP-LEFT because the log's bottom is pinned to the
+               panel — the edge that moves when it grows is the top one. -->
+          <div class="kb-article-log-wrap" id="kbArticleLogWrap" hidden>
+            <div class="kb-log-grip" id="kbArticleLogResize" title="Drag up to make the log taller">≡</div>
+            <div class="kb-article-log" id="kbArticleLog"></div>
+          </div>
+        </div>
       </div>
     </div>
   </main>
@@ -311,6 +379,7 @@
 <script src="components/label.js"></script>
 <script src="components/image.js"></script>
 <script src="components/custom.js"></script>
+<script src="surface.js"></script>
 <script src="context-stamp.js"></script>
 <script src="accent-ramp.js"></script>
 <script src="accent.js"></script>
@@ -318,6 +387,7 @@
 <script src="library.js"></script>
 <script src="lab.js"></script>
 <script src="bridge-editor.js"></script>
+<script src="kb-surface.js"></script>
 <script src="bridge-kb.js"></script>
 <script src="render-api.js"></script>
 <script src="editor.js"></script>

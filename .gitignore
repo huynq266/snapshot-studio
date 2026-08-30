@@ -6,3 +6,12 @@ snap-bridge/.token
 /kb/
 *.zip
 .claude/settings.json
+
+# generated per-machine by snap-bridge/native-host/install.ps1 (Windows) or
+# install.sh (macOS/Linux): absolute paths, node location, and this profile's
+# unpacked extension id. On macOS/Linux the manifest is installed into the
+# browser's own NativeMessagingHosts dir, so only the shim lands here.
+snap-bridge/native-host/com.snapstudio.bridge.json
+snap-bridge/native-host/snap-bridge-host.cmd
+snap-bridge/native-host/snap-bridge-host.sh
+snap-bridge/logs/

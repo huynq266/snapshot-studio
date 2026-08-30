@@ -444,6 +444,55 @@ bộ 2 cửa sổ), nhưng cần thêm **API đọc/liệt kê** từ `snap-brid
    `renderJobBoard()` (đã có từ trước, dùng cho trường hợp bài bị xoá "từ bên ngoài" UI) — không
    viết thêm state-transition riêng cho nút Delete.
 
+6. ✅ **Mở comment cho agent** (2026-08-29) — `snap_comments` / `snap_comment_resolve` trên **MCP**,
+   không chỉ `/ext`. Trước đó comment chỉ sống trong UI: agent muốn đọc phải tự mở `comments.json`,
+   và cái đọc được là `xNorm/yNorm` trên ảnh **đã render** — trong khi mọi thứ sửa được (`props` của
+   `snap_add`, `els` trong `job.json`) lại tính bằng pixel trên ảnh **gốc**. `describeKbComments()`
+   là lớp dịch đó: pin → pixel ảnh gốc (chuẩn hoá **theo từng trục**, nên `scale` khác 1 hay đường
+   export-tab-editor cũ — ảnh annotated 2026×1008 từ base 2560×1249 — đều ra đúng), + step nào sở
+   hữu ảnh, + `nearestEls` (element gần pin nhất kèm `props`, vì một pin gần như luôn nói về một
+   element cụ thể). `snap_comment_resolve` ghi thêm `resolvedBy/resolvedAt/resolvedNote`; note hiện
+   lại trên pin trong `openViewer()` để người ghim thấy đã sửa gì mà không phải đọc diff. Cố tình
+   **không** expose add/delete — agent xoá được feedback thì một correction có thể biến mất thay vì
+   được xử lý. Skill `/kb` có thêm mục "Vòng review" nối vòng: đọc pin → đọc playbook → sửa `els` →
+   `snap_render_job` → nhìn PNG → resolve kèm note → append LEARNING vào `PLACEMENT_PLAYBOOK.md`.
+
+7. ✅ **Prompt gõ thẳng trong KB Studio** (2026-08-29) — ô prompt dưới bài viết, spawn một job
+   **mode `revise`** (`kb-job.js`) trên đúng bài đang mở. Khác job "+ New job" ở chỗ nó là job
+   **nhỏ hơn**, không phải cùng một job đổi prompt: không gắn MCP server `chrome`, `canUseTool` từ
+   chối mọi tool không phải `mcp__snap__*` và mọi `snap_*` cần `tabId` — nên một job khởi từ ô text
+   không bao giờ lái được phiên đăng nhập thật của người dùng; đổi lại nó **không cần session tab
+   cũng không cần Chrome Bridge**, chạy được cả khi phía browser chưa dựng. Điều kiện "xong" cũng
+   khác: không bắt buộc `snap_write_kb` (một job trả lời "bước 3 chụp thiếu target, phải chụp lại"
+   là đã làm đúng việc mà không ghi gì).
+
+   Ba tool phải thêm để job đó **làm được việc thật** — nó không có `Read`/`Edit`/`Write` nào
+   (`tools: []`): `snap_job` (đọc/ghi `job.json`, giữ `job.prev.json` làm undo một cấp — trước đó
+   topology B không có đường nào sửa `els`, tức là không dời nổi một annotation), `snap_view` (trả
+   về chính tấm ảnh — "nhìn lại ảnh đã xuất" là luật cứng của playbook mà topology B chưa bao giờ
+   theo được), và `snap_learn` (append LEARNING vào `PLACEMENT_PLAYBOOK.md` — write duy nhất ra
+   ngoài `kb/`, append-only, một file cố định, cap 1200 ký tự).
+
+   Phía UI: `.kb-article-prompt` dưới split editor, log riêng `#kbArticleLog` — `appendLine()` chọn
+   log theo **mode của job đang chạy**, không theo panel đang hiện, để đổi panel giữa chừng không
+   nuốt mất dòng log. Job xong thì tự nạp lại bài (xoá `imageCache` trước, vì ảnh vừa render lại),
+   trừ khi người dùng đang có sửa chưa lưu — lúc đó chỉ toast, không đè lên việc của họ.
+8. ✅ **Một hội thoại cho mỗi bài** (2026-08-29) — prompt thứ hai **nối tiếp** phiên agent cũ qua
+   `options.resume` của Agent SDK, không spawn phiên trắng. `reviseSessions` (Map `slug -> {id,
+   turns}`, chỉ nằm trong RAM: CLI giữ transcript thật, đây chỉ là con trỏ — mất khi restart bridge
+   thì tốn một phiên mới chứ không mất dữ liệu). `session_id` bắt từ **message bất kỳ** trong
+   stream: mọi message đều mang nó, bền hơn bám vào một message init cụ thể của SDK. Cơ chế đã kiểm
+   chứng bằng hai lượt thật — lượt 1 "nhớ số 4127", lượt 2 kèm `resume` trả đúng "4127", và
+   `session_id` giữ nguyên qua hai lượt.
+
+   Prompt lượt sau đổi khung: không lặp lại đề bài (nó nhớ rồi) mà chỉ đưa **trạng thái đọc lại từ
+   đĩa ngay lúc đó**, kèm câu "trust it over your memory where they disagree" — người dùng có thể đã
+   sửa tay giữa hai lượt. Resume hỏng (session bị prune) thì xoá con trỏ và báo rõ "press Send again
+   to start a fresh one", không để người dùng bấm mãi vào cùng bức tường.
+
+   UI: badge `continuing · N turns` / `new session` cạnh nút **⟲ New session** — `kb_session` với
+   `reset` trả luôn state mới trong cùng một round trip, nên badge không bao giờ cũ.
+
 Ngoài ra, theo yêu cầu người dùng, hai đổi cấu trúc **ngoài phạm vi bảng trên** đã làm cùng đợt
 này — xem "KB Studio UI (Phase 3) — instruction + session tabs..." trong `KB-BRIDGE.md`:
 - Input chính đổi từ "chỉ nhận file `.md`" sang **instruction (textarea) bắt buộc + file `.md`
