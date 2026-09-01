@@ -5,7 +5,10 @@
   window.SnapKit = window.SnapKit || {};
   window.SnapKit.components = window.SnapKit.components || {};
 
-  function fontSize(el) { return el.fontSize != null ? el.fontSize : 13; }
+  /** Runtime-only — surface.js loads after every component file. */
+  const scaleOf = (src) => window.SnapKit.surface.scaleOf(src);
+
+  function fontSize(el, k) { return el.fontSize != null ? el.fontSize : 13 * (k || 1); }
   /** The card always fills its explicitly-sized (width-only) .el wrapper (see style())
    *  rather than shrink-wrapping its own content, so the vendored .cmp-text-box's own
    *  220/340px min/max-width has to be lifted or it would fight a resize drag. Height is
@@ -15,9 +18,18 @@
    *  layering convention every other extension in this kit uses — the vendored
    *  .cmp-text-box rule in tokens.css stays untouched. Never accent-coloured: the kit's
    *  own spec reserves primary-500 for the badge and the optional __connector only. */
-  function boxStyle(el) {
+  function boxStyle(el, k) {
+    k = k || 1;
     const parts = ['width:100%', 'min-width:0', 'max-width:none'];
-    if (el.border) parts.push(`border:${el.borderWidth != null ? el.borderWidth : 1.5}px solid var(--color-neutral-300)`);
+    if (el.border) parts.push(`border:${(el.borderWidth != null ? el.borderWidth : 1.5) * (el.borderWidth != null ? 1 : k)}px solid var(--color-neutral-300)`);
+    // Padding, gutter and corner all come from the vendored rule, so on a capture
+    // wider than the ~1280px the kit was drawn against the card's type grows (above)
+    // while its frame does not — a cramped card with oversized text. Scale them from
+    // the same tokens rather than editing that rule. See surface.js's uiScale().
+    if (k !== 1) {
+      parts.push(`padding:calc(var(--space-5) * ${k})`, `gap:calc(var(--space-2) * ${1.25 * k})`,
+        `border-radius:calc(var(--radius-xl) * ${k})`);
+    }
     return parts.join(';');
   }
 
@@ -33,7 +45,8 @@
       // freely resizable, height is not: it always tracks content, so x/y are the
       // box's top-left corner (an estimated starting height centers it well enough),
       // not its center like most other element types.
-      return { x: c.x - 140, y: c.y - 70, w: 280, mode: 'step',
+      const k = scaleOf(c);
+      return { x: c.x - 140 * k, y: c.y - 70 * k, w: 280 * k, mode: 'step',
         title: 'Open Settings', body: 'Click the icon in the sidebar to see the whole list.', label: 'Tip',
         compactBadge: false, hideTitle: false, hideBody: false, customNumber: null,
         border: false, borderWidth: 1.5, fontSize: null };
@@ -44,13 +57,25 @@
       // both a badge+title header and a freeform label.
       // pre-wrap: HTML collapses a raw "\n" from the textarea to a space by default —
       // without it, pressing Enter in Content has no visible effect on the card.
-      const fs = `font-size:${fontSize(el)}px;white-space:pre-wrap`;
+      const k = scaleOf(ctx.capture);
+      const fs = `font-size:${fontSize(el, k)}px;white-space:pre-wrap`;
+      // The header badge is the same .cmp-step-marker the standalone component uses,
+      // and it is sized entirely by that vendored rule — so without this it stays 28px
+      // tall inside a card whose type has already grown. Kept in step with step.js's
+      // own inline override rather than duplicating a second scale rule.
+      const badge = k === 1 ? ''
+        : `height:${28 * k}px;font-size:${Math.max(9, Math.round(28 * k * 0.46))}px;`
+          + `border-width:${(2 * k).toFixed(2)}px;`
+          // compact is a true circle sized by an explicit width in the vendored rule,
+          // so it needs the width scaled too; the pill form is width:auto and must not
+          // get one, or the label stops driving its own size.
+          + (el.compactBadge ? `width:${28 * k}px;padding:0` : `padding:0 calc(var(--space-3) * ${k})`);
       const head = el.mode === 'step'
-        ? (el.hideTitle ? '' : `<div class="cmp-text-box__header"><span class="cmp-step-marker${el.compactBadge ? ' cmp-step-marker--compact' : ''}">${ctx.stepLabel(el, el.compactBadge)}</span>`
+        ? (el.hideTitle ? '' : `<div class="cmp-text-box__header"><span class="cmp-step-marker${el.compactBadge ? ' cmp-step-marker--compact' : ''}" style="${badge}">${ctx.stepLabel(el, el.compactBadge)}</span>`
           + `<span class="cmp-text-box__title" style="${fs}">${ctx.escapeHtml(el.title)}</span></div>`)
         : (el.label ? `<span class="cmp-text-box__label" style="${fs}">${ctx.escapeHtml(el.label)}</span>` : '');
       const body = el.hideBody ? '' : `<p class="cmp-text-box__body" style="${fs}">${ctx.escapeHtml(el.body)}</p>`;
-      return `<div class="cmp-text-box" style="${boxStyle(el)}">${head}${body}</div>`;
+      return `<div class="cmp-text-box" style="${boxStyle(el, k)}">${head}${body}</div>`;
     },
 
     style(el) {
@@ -63,8 +88,9 @@
     },
 
     propsHtml(el, ctx) {
-      const borderW = el.borderWidth != null ? el.borderWidth : 1.5;
-      const fs = fontSize(el);
+      const k = scaleOf(ctx.capture);
+      const borderW = el.borderWidth != null ? el.borderWidth : 1.5 * k;
+      const fs = fontSize(el, k);
       let html = ctx.rowSeg('pMode', 'Kind', [['step', 'Tied to a step'], ['note', 'Standalone note']], el.mode);
       html += el.mode === 'step'
         ? ctx.rowInput('pTitle', 'Title', el.title) + ctx.rowCheck('pHideTitle', 'Hide the title (hides the Step badge too)', el.hideTitle)
@@ -74,9 +100,9 @@
       html += ctx.rowText('pBody', 'Content', el.body, 4) + ctx.rowCheck('pHideBody', 'Hide the content', el.hideBody);
       html += ctx.rowCheck('pBorder', 'Add a border to the card', el.border);
       if (el.border) {
-        html += `<div class="prop-row"><label id="pBorderWLabel">Border width — ${borderW}px</label><input type="range" id="pBorderW" min="1" max="4" step="0.5" value="${borderW}" style="width:100%"></div>`;
+        html += `<div class="prop-row"><label id="pBorderWLabel">Border width — ${borderW}px</label><input type="range" id="pBorderW" min="1" max="${4 * k}" step="0.5" value="${borderW}" style="width:100%"></div>`;
       }
-      html += `<div class="prop-row"><label id="pFontSizeLabel">Font size — ${fs}px</label><input type="range" id="pFontSize" min="11" max="20" step="1" value="${fs}" style="width:100%"></div>`;
+      html += `<div class="prop-row"><label id="pFontSizeLabel">Font size — ${fs}px</label><input type="range" id="pFontSize" min="${11 * k}" max="${20 * k}" step="1" value="${fs}" style="width:100%"></div>`;
       html += ctx.note('Do not put a standalone step marker and a step-tied text box on the same number in one frame — that is two labels competing with each other, not more clarity. The border uses a neutral colour, not the accent — primary-500 is for the badge and the connector only, and an accent border here would make this card look as important as the one it explains. Drag the bottom-right corner to change the width; the height always follows the content, including line breaks typed with Enter.');
       return html;
     },

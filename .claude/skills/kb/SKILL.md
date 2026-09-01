@@ -38,7 +38,7 @@ các luật rút ra từ lỗi đã ship thật.
 | `snap_frame_scroll` | Cuộn trong frame |
 | `snap_frame_click` | Click trong frame |
 | `snap_capture_tab` | Chụp tab → ghi PNG vào `kb/img/` (đường **duy nhất** ghi được file) |
-| `snap_kit` | Đọc `use_when`/`gotchas` của 8 component — **gọi để chọn component** |
+| `snap_kit` | `use_when`/`gotchas`, **cộng `anchor` + tên prop thật + giá trị mặc định** của từng component — gọi để chọn component **và để tra tên prop, đừng đoán** |
 | `snap_open` | Nạp PNG vào editor |
 | `snap_add` | Thêm annotation |
 | `snap_export` | Render PNG cuối (headless — không phụ thuộc cỡ cửa sổ) |
@@ -47,7 +47,7 @@ các luật rút ra từ lỗi đã ship thật.
 | `snap_comments` | Đọc comment người dùng ghim lên ảnh → pixel thật + step + element gần pin |
 | `snap_comment_resolve` | Đóng một comment, sau khi đã sửa **và** đã nhìn ảnh render lại |
 | `snap_job` | Đọc / ghi đè `job.json` của một bài — sửa `els` khi phiên không có tool sửa file |
-| `snap_view` | **Nhìn** một ảnh trong `kb/` — thay cho `Read` khi phiên không đọc được file |
+| `snap_view` | **Nhìn** một ảnh trong `kb/` — thay cho `Read` khi phiên không đọc được file. `grid:true` phủ lưới toạ độ có nhãn: bắt buộc khi cần **đọc** một con số x/y |
 | `snap_learn` | Append một LEARNING vào `PLACEMENT_PLAYBOOK.md` (chỉ thêm, không sửa được phần đã có) |
 
 `mcp__chrome__*` dùng để điều hướng (`navigate`, `click`, `fill`, `take_screenshot` để *nhìn*).
@@ -85,17 +85,24 @@ khung**, phải `snap_frame_scroll` tới trước. (Playbook #2 — đây là l
 `snap_open` → (`snap_kit` nếu chưa chắc chọn gì) → `snap_add`.
 
 - **Dùng `at` thay vì đoán toạ độ.** `snap_add({type, at: {selector, tabId, frameId}})` đọc box
-  thật của element rồi tự tính toạ độ, tự xử lý ngữ nghĩa `x/y` riêng của từng type. `props`
-  vẫn ghi đè được khi cần dịch đi.
+  thật của element rồi tự tính toạ độ, tự xử lý ngữ nghĩa `x/y` riêng của từng type — **kể cả
+  `step`/`label`, vốn lấy x/y là TÂM chứ không phải góc**. `props` vẫn ghi đè được khi cần dịch đi.
   - Selector lấy từ `snap_frame_find` (nó đảm bảo duy nhất — xem `selectorIsUnique`).
   - **Id bắt đầu bằng số** thì dùng `[id="812"]`, đừng dùng `#812` (cần escape `#\38 12`,
     rất dễ hỏng khi đi qua JSON).
-  - `arrow` **không** neo được bằng `at` (cần hai đầu mút) — truyền `x1/y1/x2/y2`.
+  - `arrow` **neo được bằng `at`**: `at.side` cho mũi tên đi từ vùng trống vào element, hoặc
+    `at.toSelector` để nối hai element. Đầu mũi tên luôn dừng **trước** mép target, không đè lên.
   - `at` đọc vị trí **sống**, nên trang phải đang cuộn y như lúc `snap_capture_tab` chạy.
-- Chỉ đoán `x/y` khi không có element nào để neo (ví dụ callout đặt ở vùng trắng). Khi đó đọc
-  playbook cho ngữ nghĩa `x/y` từng type (`zoom` là **tâm**, `textbox` là **góc trên-trái**).
-- **Blur PII** (tên tài khoản, email, tên cửa hàng, tên khách) — playbook #6.
+  - `at` cũng tự nhân `uiScale` của ảnh và tự chọn phía **còn chỗ trống** khi không truyền `side`.
+- Chỉ đoán `x/y` khi không có element nào để neo (ví dụ callout đặt ở vùng trắng). Khi đó:
+  `snap_view({path, grid:true})` để **đọc** số thay vì ước lượng, và đọc playbook cho ngữ nghĩa
+  `x/y` từng type (`zoom`/`step`/`label` là **tâm**, `textbox`/`highlight`/`blur` là **góc trên-trái**).
+- **Blur PII** (tên tài khoản, email, tên cửa hàng, tên khách) — đặt vào `job.globalEls` một lần
+  cho cả bài, không lặp lại từng bước; playbook #6.
 - ≥1 `zoom` lên chi tiết quyết định — playbook #5.
+- **Đọc khối `WARNING:`** trong kết quả `snap_add`/`snap_job`/`snap_render_job`: tràn mép, callout
+  đè lên vùng nó trỏ tới, đầu mũi tên nằm trong khung, prop không tồn tại. Không chặn render — nên
+  bỏ qua là tự chọn ship ảnh hỏng.
 
 ### 6. Xuất và KIỂM TRA BẰNG MẮT
 `snap_export({ out: "img/NN-slug-annotated.png" })` → rồi **`Read` file PNG đó** (phiên không có
@@ -127,8 +134,13 @@ phải để người dùng nhìn.
 ### 7. Ghi bài
 
 **Bài nhiều bước → dùng `job.json`** (khuyến nghị): ghi `kb/<slug>/job.json` với `title`,
-`slug`, `md`, `intro`, `steps[]` (`n`, `heading`, `src`, `out`, `body`, `notes`, `els`),
-`outro`; rồi `snap_render_job({ path: "<slug>/job.json" })` để render mọi ảnh **và** ghép bài.
+`slug`, `md`, `intro`, `globalEls`, `steps[]` (`n`, `heading`, `src`, `out`, `body`, `notes`,
+`els`), `outro`; rồi `snap_render_job({ path: "<slug>/job.json" })` để render mọi ảnh **và**
+ghép bài.
+
+`globalEls` là lớp annotation dùng chung cho **mọi** bước, vẽ dưới `els` của từng bước. Chỗ
+đúng để đặt blur PII: chip tài khoản, tên cửa hàng — thứ nằm cùng một vị trí trên mọi ảnh.
+KB Studio hiện chúng trong bản xem sống ở dạng khoá (không kéo được — chúng thuộc về job).
 
 Lợi ích: sửa một câu chữ hay dịch một callout → chạy lại `snap_render_job` mất **vài giây**,
 không cần lái browser, không chạm vào app thật. `els` lưu `props` đã tính xong, nên re-render

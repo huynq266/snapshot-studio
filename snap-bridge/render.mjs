@@ -138,6 +138,53 @@ export async function renderSteps(steps, opts = {}) {
   return results;
 }
 
+/** Cùng một ảnh, phủ lưới toạ độ có nhãn — cho snap_view({grid:true}).
+ *
+ *  Vì sao cần: ảnh trả về cho model LUÔN bị thu nhỏ cho vừa ngân sách ảnh
+ *  (2560px về ~2000px hoặc nhỏ hơn). Một toạ độ đọc bằng mắt trên bản thu nhỏ
+ *  sai đúng bằng hệ số đó, và đây chính là lỗi PLACEMENT_PLAYBOOK ghi ngày
+ *  2026-08-30 ("ước lượng pixel bằng mắt là không đáng tin") — chẩn đoán lúc đó
+ *  dừng ở "cẩn thận hơn", trong khi nguyên nhân là công cụ trả về một hệ toạ độ
+ *  khác mà không nói ra. Có nhãn thì không phải ước lượng nữa: đọc số.
+ *
+ *  Vẽ bằng chính trình duyệt đang render ảnh KB, không thêm thư viện ảnh nào. */
+export async function renderGridOverlay(srcAbs, size, gap) {
+  const pw = await import("playwright");
+  const browser = await withHiddenConsole(() => pw.chromium.launch());
+  try {
+    const page = await browser.newPage({ viewport: { width: Math.min(size.w, 4000), height: 600 }, deviceScaleFactor: 1 });
+    const dataUrl = "data:image/png;base64," + readFileSync(srcAbs).toString("base64");
+    const w = size.w, h = size.h;
+    // Nhãn to theo khung ảnh, cùng lý do với surface.js's uiScale(): 11px trên
+    // ảnh 2560 là không đọc được sau khi bản xem bị thu nhỏ.
+    const fs = Math.max(11, Math.round(11 * Math.min(3, Math.max(1, w / 1280))));
+    const lines = [];
+    for (let x = gap; x < w; x += gap) {
+      lines.push(`<line x1="${x}" y1="0" x2="${x}" y2="${h}"/>`);
+      lines.push(`<text class="lbl" x="${x + 3}" y="${fs + 2}">${x}</text>`);
+      lines.push(`<text class="lbl" x="${x + 3}" y="${h - 5}">${x}</text>`);
+    }
+    for (let y = gap; y < h; y += gap) {
+      lines.push(`<line x1="0" y1="${y}" x2="${w}" y2="${y}"/>`);
+      lines.push(`<text class="lbl" x="3" y="${y - 4}">${y}</text>`);
+      lines.push(`<text class="lbl" x="${w - 3}" y="${y - 4}" text-anchor="end">${y}</text>`);
+    }
+    await page.setViewportSize({ width: w, height: h });
+    await page.setContent(`<style>
+      html,body{margin:0;padding:0;background:#fff}
+      #g{position:relative;width:${w}px;height:${h}px}
+      #g img{display:block;width:${w}px;height:${h}px}
+      svg{position:absolute;inset:0}
+      line{stroke:rgba(255,0,128,.55);stroke-width:${Math.max(1, Math.round(w / 1280))}}
+      .lbl{fill:#ff0080;font:700 ${fs}px ui-monospace,Menlo,Consolas,monospace;paint-order:stroke;stroke:#fff;stroke-width:${Math.max(2, Math.round(fs / 4))}px;stroke-linejoin:round}
+    </style><div id="g"><img src="${dataUrl}"><svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">${lines.join("")}</svg></div>`, { waitUntil: "load" });
+    const el = await page.$("#g");
+    return await el.screenshot({ type: "png" });
+  } finally {
+    await browser.close();
+  }
+}
+
 // ---- CLI ------------------------------------------------------------------
 if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url))) {
   const specPath = process.argv[2];

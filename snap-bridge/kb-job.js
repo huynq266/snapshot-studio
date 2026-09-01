@@ -21,13 +21,29 @@
    the origin(s) of the tab(s) the user added — see canUseTool below.
 
    One job at a time (module-level state, not a Map) — starting a second
-   job while one runs is rejected outright, not queued. */
+   job while one runs is rejected outright, not queued.
+
+   An AUTHORING job is three agent sessions in sequence, not one (see
+   runAuthorPipeline): capture (drives the browser, produces the images and the
+   annotations on them) -> write (no browser, writes the prose from those images)
+   -> review (no browser, fixes NOTHING, files findings). Findings carry an
+   owner, and each of the first two stages is resumed with its own findings for
+   up to MAX_FIX_ROUNDS passes. The split is not for parallelism — nothing here
+   runs concurrently and it must not: the Snap Studio editor that snap_open/
+   snap_add/snap_export drive is a singleton (server.js's lastOpened mirrors one
+   open capture) and job.json is written whole, so two agents working at once
+   would overwrite each other's annotations. It is for CONTEXT: the agent that
+   spent forty tool calls driving Chrome is the worst-placed one to judge
+   whether the exported PNG reads well, because its context is full of what it
+   MEANT to draw. A stage that has only the PNGs and the playbook sees the
+   pixels instead. */
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadChromeBridgeConfig } from "./chrome-bridge-config.js";
+import { readReview, findingsFor, summarizeReview } from "./kb-review.js";
 
 // Same computation as server.js — not process.cwd(), which depends on how
 // this process happened to be launched and is not guaranteed to be the repo
@@ -59,7 +75,7 @@ const CHROME_SAFE_TOOLS = new Set([
 // mcp__snap__* tools that take a tabId — Snap Studio's own tools, called
 // straight against the real chrome.tabs.* APIs in background.js, so unlike
 // mcp__chrome__* they are NOT scoped by Chrome Bridge's own tab-group
-// boundary. These are gated against currentTabId (see runJob()) instead —
+// boundary. These are gated against currentTabId (see runCaptureStage()) instead —
 // the tabId Chrome Bridge itself handed back from this job's own navigate
 // call, tracked from the tool_result stream since canUseTool only sees
 // call INPUTS, never outputs. snap_add is handled separately below since it
@@ -78,7 +94,7 @@ const SNAP_TAB_TOOLS = new Set([
    What deliberately does NOT live there: the session-tabs HARD CONSTRAINT
    below. That is a safety boundary, not a style guide — keeping it here
    means it cannot be weakened by editing a skill file, and it stays paired
-   with the canUseTool gate in runJob() that actually enforces it. */
+   with the canUseTool gate in runCaptureStage() that actually enforces it. */
 const SKILL_DIR = path.join(REPO_ROOT, ".claude", "skills", "kb");
 
 function readSkillFiles() {
@@ -173,8 +189,19 @@ export function getCurrentJob() {
   return currentJob ? publicView(currentJob) : null;
 }
 function publicView(job) {
-  const { id, mode, slug, status, startedAt, endedAt, mdFilename, instruction, sessionTabs, log, resultPath, error } = job;
-  return { id, mode, slug, status, startedAt, endedAt, mdFilename, instruction, sessionTabs, log, resultPath, error };
+  const { id, mode, slug, status, stage, round, startedAt, endedAt, mdFilename, instruction, sessionTabs, log, resultPath, error } = job;
+  return { id, mode, slug, status, stage, round, startedAt, endedAt, mdFilename, instruction, sessionTabs, log, resultPath, error };
+}
+
+/** Which review pass snap_findings is about to file. Owned here rather than
+ *  asked of the reviewing model: the fix loop is what knows which pass this is,
+ *  and a model counting its own rounds is wrong exactly on the round where the
+ *  count decides whether to keep going. Outside a running job (a human calling
+ *  snap_findings by hand) it continues from whatever is on disk. */
+export function currentReviewRound(slug) {
+  if (currentJob && currentJob.status === "running" && currentJob.slug === slug) return currentJob._reviewRound;
+  const prev = readReview(slug);
+  return prev && prev.round ? prev.round + 1 : 1;
 }
 
 /** An agent working an AUTHORING job just wrote to kb/<slug>. That job could
@@ -221,10 +248,12 @@ export function startJob({ mode, slug, context, instruction, markdown, mdFilenam
   const id = randomUUID();
   const job = {
     id, mode: revise ? "revise" : "author", slug: slug || null, context: context || null,
-    status: "running", startedAt: Date.now(), endedAt: null,
+    status: "running", stage: null, round: 0, startedAt: Date.now(), endedAt: null,
     mdFilename: mdFilename || null, instruction, sessionTabs: revise ? [] : sessionTabs,
     log: [], resultPath: null, error: null,
-    _query: null, _wroteArticle: false,
+    // One resumable conversation per STAGE, so a fix round argues with the agent
+    // that made the thing rather than with a stranger holding the same files.
+    _query: null, _sessions: {}, _reviewRound: 1,
   };
   currentJob = job;
 
@@ -240,7 +269,7 @@ export function startJob({ mode, slug, context, instruction, markdown, mdFilenam
 
   const run = revise
     ? runReviseJob(job, instruction, snapSelf, push)
-    : runJob(job, instruction, markdown, sessionTabs, chromeCfg, snapSelf, push);
+    : runAuthorPipeline(job, instruction, markdown, sessionTabs, chromeCfg, snapSelf, push);
   run.catch((e) => {
     job.status = "error";
     job.error = String((e && e.message) || e);
@@ -263,15 +292,203 @@ export function cancelJob(id) {
   return true;
 }
 
-async function runJob(job, instruction, markdown, sessionTabs, chromeCfg, snapSelf, push) {
-  const allowedOrigins = originsOf(sessionTabs);
-  if (!allowedOrigins.size) throw new Error("none of this job's session tabs have a URL that could be parsed to navigate to.");
-  // Learned from this job's own navigate tool_results as they stream past
-  // (see the message loop below) — canUseTool only sees call INPUTS, never
-  // outputs, so it cannot discover the tabId Chrome Bridge assigned on its
-  // own. Every mcp__snap__* call that needs a tabId is checked against this,
-  // not against a pre-known list — there is no such list any more, the job
-  // never has one until it navigates for itself.
+/* How many times findings may come back after the first review. Two is a
+   budget, not a target: the first fix round is where almost every real defect
+   is cleared, the second catches what that round broke, and a third has meant,
+   in practice, that the reviewer and the fixer disagree about taste rather than
+   about a defect — a conversation for the user, not another six minutes of
+   headless rendering. Whatever is still open when the budget runs out stays in
+   review.json and is reported in the log, not silently dropped. */
+const MAX_FIX_ROUNDS = 2;
+/* Log banners. The stage names are internal ("capture"/"write"/"review"); what
+   the user watching the log needs is what is about to happen to their article. */
+const STAGE_TITLES = {
+  capture: "Capture — shooting the screens and annotating them",
+  write: "Write — turning the captures into an article",
+  review: "Review — fresh eyes on every image and every line",
+};
+const MODEL = "claude-sonnet-5";
+
+function jobJsonPath(slug) {
+  return path.join(REPO_ROOT, "kb", slug, "job.json");
+}
+function readJobJson(slug) {
+  try { return JSON.parse(readFileSync(jobJsonPath(slug), "utf8")); } catch { return null; }
+}
+
+/** Everything the CAPTURE stage owns, in a form two job objects can be compared
+ *  by. The write stage may rewrite every word in job.json and must not move a
+ *  single annotation — and "must not" is worth nothing as a sentence in a
+ *  prompt: snap_job takes the whole object, so a writing agent tidying a step it
+ *  thinks is misplaced silently discards coordinates that cost a browser
+ *  session. This is what turns that role boundary into something the bridge
+ *  enforces instead of something it hopes for.
+ *
+ *  Exported, like describeToolUse below, only so a pure piece of this file can
+ *  be exercised without spawning three agent sessions and a browser. Nothing
+ *  else imports it. */
+export function visualSignature(j) {
+  const steps = (j && Array.isArray(j.steps) ? j.steps : []).map((s, i) => ({
+    n: s && s.n != null ? s.n : i + 1,
+    src: (s && s.src) || null,
+    out: (s && s.out) || null,
+    els: (s && s.els) || [],
+  }));
+  return JSON.stringify({ steps, globalEls: (j && j.globalEls) || [] });
+}
+
+function stagePreamble(name, body) {
+  return [
+    "--- THIS JOB'S PIPELINE (overrides the skill above where they disagree) ---",
+    "",
+    `This article is built by three agents in sequence, not one: CAPTURE (screenshots and the annotations on them) -> WRITE (the prose) -> REVIEW (fresh eyes; files findings, fixes nothing). The review's findings then come back to capture and write for up to ${MAX_FIX_ROUNDS} fix rounds. Each stage is its own conversation and is resumed for its own fix rounds.`,
+    "",
+    `You are the ${name.toUpperCase()} stage.`,
+    "",
+    "The skill documents above describe the whole pipeline as ONE agent's work, because that is how a human runs it by hand from Claude Code. Everything they say about placement, verification and cleanup still binds you. Where they hand you work that belongs to another stage, this section wins — and the bridge denies the tools that are not yours, so a call that comes back refused is the boundary, not a misconfiguration to retry.",
+    "",
+    body,
+  ].join("\n");
+}
+
+const CAPTURE_ROLE = [
+  "YOUR OUTPUT is kb/<slug>/job.json and the PNGs it points at. Per step: `n`, a short factual `heading`, `src`, `out`, `els`, and `notes`.",
+  "",
+  "- Do NOT write the article's prose. Leave `body` empty or a single factual line, and leave `intro`/`outro` out entirely. The write stage writes them from your images and your notes; prose you write now is prose it has to undo.",
+  "- `notes` IS your handoff, and the only thing the writer will know that is not in the picture. For each step: which screen this is, any state you had to set up to get there, what you annotated and why that element matters to the reader, and anything you could not get into frame. Write it for someone who cannot open the app.",
+  "- Follow the skill's steps 2 -> 6b for every step, including looking at every exported PNG (snap_view) and writing job.json after EACH step rather than at the end.",
+  "- snap_write_kb is denied to you: the markdown is assembled by the write stage, from job.json.",
+  "",
+  "On a FIX ROUND you are resumed with the review's findings routed to you. You own the whole visual layer, so both kinds are yours: moving, retyping or removing an annotation (job.json, no browser needed) and re-shooting a capture — navigate again, because the tab from your previous round is gone, and use the tabId that call returns.",
+  "ALWAYS finish a fix round with snap_render_job so the exported PNGs match the job.json you just changed, then snap_view to look at what you actually produced. The reviewer reads those PNGs, not your job.json: an annotation moved in the file and not re-rendered comes straight back to you as the same finding, and you will have no way to tell that is what happened.",
+  "Fix what is filed; if a finding is wrong, say so plainly rather than making a change you do not believe in.",
+].join("\n");
+
+const WRITE_ROLE = [
+  "YOU HAVE NO BROWSER. Every mcp__chrome__* tool, and every snap tool that reads a live tab (snap_capture_tab, snap_frame_*, snap_add with `at`), is denied. You work from what the capture stage left in kb/.",
+  "",
+  "YOUR OUTPUT is the article's words, written into job.json and then rendered:",
+  "1. snap_job to read the article, and snap_view on EVERY image before you write a word about it. The step's `notes` tell you what the capture agent knew; the picture tells you what the reader will actually see. Where they disagree, trust the picture and flag it in your final message.",
+  "2. Write `title`, `intro`, each step's `heading` and `body`, the reader-facing `notes` (the `> **Note:**` callouts), and `outro`. Second person, the action the reader takes, in the order they take it. Never describe a control that is not visible in that step's image.",
+  "3. snap_render_job to regenerate the markdown from job.json. The .md is GENERATED — editing it directly is overwritten by the next render.",
+  "",
+  "YOU DO NOT OWN THE VISUAL LAYER. `src`, `out`, `els`, `globalEls`, and the number and order of steps are frozen for you, and a snap_job write that changes any of them is REJECTED by the bridge — that is a gate, not a style note. If an image is wrong, mis-annotated or missing, write that in your final message: the review stage routes it to capture, which can actually re-shoot it.",
+].join("\n");
+
+const REVIEW_ROLE = [
+  "YOU DID NOT TAKE THESE SCREENSHOTS AND YOU DID NOT WRITE THIS PROSE. That is the entire reason you are a separate stage: the agent that placed an annotation remembers what it meant to draw, and reads its own export as if that intent were on the screen. You only have the pixels. Read them as a reader who has never seen this app.",
+  "",
+  "YOU FIX NOTHING. snap_render_job, snap_export, snap_open, snap_add, snap_write_kb, snap_comment_resolve, and every snap_job WRITE are denied to you. Your only write is snap_findings. A defect you notice and do not file is a defect nobody fixes.",
+  "",
+  "Method:",
+  "1. snap_job to read the article, then snap_view on EVERY exported image. Use grid:true whenever a judgement depends on READING a coordinate rather than eyeballing it.",
+  "2. snap_comments — a pin a human left is a finding that already has a person behind it. Do not resolve them; route them.",
+  "3. Check, at minimum: the playbook's hard rules (#0 nothing overflows the frame, #1 no callout over its own target, #2 the target is present, visible and in the right state IN THIS IMAGE, #6 no PII left showing), #4 step 1 orients in the menu, #5 at least one zoom on a decisive detail; then prose against picture (does the text describe what is actually shown?), heading order, and coverage against the user's instruction — a step the instruction asked for and nobody shot is a finding too.",
+  "4. snap_findings once, at the end. Route each one: owner \"capture\" for anything visual (a re-shoot, or an annotation to move, retype or remove), owner \"write\" for prose. severity \"blocker\" only for something wrong or misleading as it stands; taste is a nit. verdict \"pass\" only when no blocker remains — it ends the loop and ships the article.",
+  "5. snap_learn when a finding is a placement rule the next article should not have to relearn. It is the only part of this job that outlives the article.",
+  "",
+  "Be specific enough to act on: name the element, the step, the text. \"The callout looks off\" routes to nobody.",
+].join("\n");
+
+function formatFindings(list) {
+  return list.map((f, i) => [
+    `${i + 1}. [${f.severity}]${f.step != null ? ` step ${f.step}` : ""}${f.img ? ` (${f.img})` : ""}`,
+    `   what: ${f.what}`,
+    f.why ? `   why: ${f.why}` : null,
+    `   fix: ${f.fix}`,
+  ].filter(Boolean).join("\n")).join("\n");
+}
+
+function fixPrompt(review, findings, slug) {
+  return [
+    `Fix round ${review.round} on "${slug}". The review stage looked at the article with fresh eyes and filed these findings against YOUR stage:`,
+    "",
+    formatFindings(findings),
+    "",
+    review.summary ? `Reviewer's overall note: ${review.summary}\n` : "",
+    "Everything on disk has been re-read since your last turn — trust the files over your memory of them where they differ; the user may have edited by hand in between.",
+    "Fix these, then say in one line per finding what you changed. If you believe a finding is wrong, say which one and why instead of making a change you do not stand behind — either way it goes back to the reviewer.",
+  ].filter(Boolean).join("\n");
+}
+
+/** One stage = one query() = one resumable conversation. Everything that
+ *  differs between the three is passed in; what is shared is the resume
+ *  bookkeeping, the log banner, and the rule that a stage which finished its
+ *  FIRST pass without writing anything down is a failure rather than a quiet
+ *  success (requireAnyOf — see the call sites for why fix rounds are exempt). */
+async function runStage(job, push, { name, round, systemPrompt, prompt, mcpServers, canUseTool, requireAnyOf, onTabId }) {
+  job.stage = name;
+  job.round = round;
+  push(round
+    ? `— ${STAGE_TITLES[name] || name} · fix round ${round} —`
+    : `— ${STAGE_TITLES[name] || name} —`);
+
+  const attempt = async (resume) => {
+    const q = query({
+      prompt: singleUserMessage(prompt),
+      options: {
+        model: MODEL,
+        cwd: REPO_ROOT,
+        tools: [],                    // no built-in tools at all — MCP tools only
+        systemPrompt,
+        mcpServers,
+        // Empty on purpose: everything routes through canUseTool, INCLUDING
+        // mcp__snap__* (an allowedTools entry skips canUseTool entirely, which
+        // would silently defeat the tabId scoping on snap_capture_tab/
+        // snap_frame_*, and the role gates on snap_job/snap_findings below).
+        // NOT 'dontAsk': empirically (see KB-BRIDGE.md mục 7) 'dontAsk' denies
+        // anything outside allowedTools BEFORE canUseTool is ever consulted.
+        // 'default' + canUseTool is what actually routes every call through
+        // canUseTool for a real allow/deny decision. Never 'bypassPermissions'.
+        allowedTools: [],
+        permissionMode: "default",
+        canUseTool,
+        ...(resume ? { resume } : {}),
+      },
+    });
+    job._query = q;
+    return consumeStream(q, job, push, {
+      onTabId,
+      onSessionId: (id) => { job._sessions[name] = id; },
+    });
+  };
+
+  const resume = job._sessions[name] || null;
+  let out;
+  try {
+    out = await attempt(resume);
+  } catch (e) {
+    // A stored session id can go stale (CLI session pruned, bridge restarted
+    // between rounds). Losing the previous turn's context costs quality, not
+    // correctness — every fix prompt carries its findings and the files are on
+    // disk — so start clean rather than failing the whole article over it.
+    if (!resume) throw e;
+    delete job._sessions[name];
+    push(`Could not resume the ${name} conversation (${e.message}) — starting a fresh one for this round.`);
+    out = await attempt(null);
+  }
+
+  if (job.status === "cancelled") return out;
+  if (!out.ok) throw new Error(`${name} stage: ${out.error}`);
+  if (requireAnyOf && !requireAnyOf.some((t) => out.calledTools.has(t))) {
+    throw new Error(`the ${name} stage finished without calling ${requireAnyOf.join(" or ")} — whatever it decided was never written down.`);
+  }
+  return out;
+}
+
+function snapServer(snapSelf) {
+  return { snap: { type: "http", url: snapSelf.url, headers: { Authorization: `Bearer ${snapSelf.token}` } } };
+}
+
+/* ---- stage 1: capture -------------------------------------------------- */
+
+async function runCaptureStage(job, ctx, push, findings, round) {
+  const { sessionTabs, allowedOrigins, chromeCfg, snapSelf } = ctx;
+  // Learned from this job's own navigate tool_results as they stream past (see
+  // consumeStream) — canUseTool only sees call INPUTS, never outputs, so it
+  // cannot discover the tabId Chrome Bridge assigned on its own. Reset per round
+  // on purpose: a resumed conversation does NOT get its old tab back, and every
+  // snap tool that takes a tabId stays denied until a fresh navigate lands.
   let currentTabId = null;
 
   function originAllowed(url) {
@@ -280,87 +497,332 @@ async function runJob(job, instruction, markdown, sessionTabs, chromeCfg, snapSe
 
   async function canUseTool(toolName, input) {
     if (toolName === "mcp__chrome__new_tab") {
-      push(`Denied ${toolName} — use mcp__chrome__navigate instead, it opens this job's own tab automatically.`);
+      push("Denied — opening a second browser tab; this job navigates the one it already has.");
       return { behavior: "deny", message: "Do not open new tabs directly. Call mcp__chrome__navigate without a tabId instead — it opens (or reuses) this job's own tab and returns its tabId." };
     }
     if (toolName === "mcp__chrome__navigate") {
       if (input && typeof input.url === "string" && input.url && !originAllowed(input.url)) {
-        push(`Denied navigate to "${input.url}" — outside this job's allowed origin(s).`);
+        push(`Denied — going to ${shortUrl(input.url)}, which is outside the site(s) this job was given.`);
         return { behavior: "deny", message: `Navigating to "${input.url}" is not allowed — this job is scoped to: ${[...allowedOrigins].join(", ")}. Stay within these, or stop and report if a different origin needs to be added to the session.` };
       }
       return { behavior: "allow" };
     }
     if (CHROME_SAFE_TOOLS.has(toolName)) {
-      // Scoped by Chrome Bridge's own tab-group boundary already — this job
-      // can only ever learn a tabId from its own navigate/list_tabs calls,
-      // both confined to its own group, so there is nothing left to check
-      // here (see the file header comment for the full reasoning).
+      // Scoped by Chrome Bridge's own tab-group boundary already — this job can
+      // only ever learn a tabId from its own navigate/list_tabs calls, both
+      // confined to its own group, so there is nothing left to check here (see
+      // the file header comment for the full reasoning).
       return { behavior: "allow" };
     }
     if (toolName.startsWith("mcp__snap__")) {
+      // The prose belongs to the write stage. Denying it here rather than asking
+      // for it in the prompt is what stops a capture agent from "finishing the
+      // job" with an article the writer then has to unpick.
+      if (toolName === "mcp__snap__snap_write_kb") {
+        push("Denied — writing the article text; that is the write stage's job.");
+        return { behavior: "deny", message: "snap_write_kb belongs to the write stage. Put the step in job.json with snap_job; the article's markdown is rendered from it later." };
+      }
+      if (toolName === "mcp__snap__snap_findings") {
+        return { behavior: "deny", message: "snap_findings belongs to the review stage — it is how findings come TO you, not something you file." };
+      }
+      // The article is whatever this job's first job.json write named; after
+      // that this job stays inside it. A capture agent wandering into another
+      // article would be writing over a finished one.
+      if (job.slug && input && typeof input.slug === "string" && input.slug !== job.slug) {
+        push(`Denied — touching the article "${input.slug}"; this job is building "${job.slug}".`);
+        return { behavior: "deny", message: `This job is building "${job.slug}". Do not read or write another article.` };
+      }
       const tabId = toolName === "mcp__snap__snap_add" ? (input && input.at && input.at.tabId) : (input && input.tabId);
       if (SNAP_TAB_TOOLS.has(toolName) || (toolName === "mcp__snap__snap_add" && tabId != null)) {
         if (tabId == null) {
-          push(`Denied ${toolName} — no tabId given.`);
+          push(`Denied — ${doing(toolName, input)}: no browser tab was named.`);
           return { behavior: "deny", message: `This tool requires an explicit tabId — use the tabId returned by your mcp__chrome__navigate call.` };
         }
         if (currentTabId == null) {
-          push(`Denied ${toolName} on tab ${tabId} — navigate hasn't opened this job's own tab yet.`);
-          return { behavior: "deny", message: "Call mcp__chrome__navigate first to open the page, then use the tabId it returns." };
+          push(`Denied — ${doing(toolName, input)}: this job has not opened its own browser tab yet.`);
+          return { behavior: "deny", message: "Call mcp__chrome__navigate first to open the page, then use the tabId it returns. On a fix round your previous tab is gone — navigate again." };
         }
         if (tabId !== currentTabId) {
-          push(`Denied ${toolName} on tab ${tabId} — this job's own tab is ${currentTabId}.`);
+          push(`Denied — ${doing(toolName, input)}: that is browser tab ${tabId}, this job's tab is ${currentTabId}.`);
           return { behavior: "deny", message: `tabId ${tabId} is not this job's tab (${currentTabId}). Use the tabId from your last navigate call.` };
         }
       }
       return { behavior: "allow" };
     }
-    push(`Denied disallowed tool "${toolName}".`);
+    push(`Denied — ${doing(toolName, input)}: not something this job may do.`);
     return { behavior: "deny", message: `Tool "${toolName}" is not permitted for this unattended KB job.` };
   }
 
-  const q = query({
-    prompt: singleUserMessage(buildPrompt(instruction, markdown, sessionTabs)),
-    options: {
-      model: "claude-sonnet-5",
-      cwd: REPO_ROOT,
-      tools: [],                    // no built-in tools at all — MCP tools only
-      systemPrompt: buildSystemPrompt(sessionTabs, allowedOrigins),
-      mcpServers: {
-        chrome: { type: "http", url: chromeCfg.url, headers: chromeCfg.headers },
-        snap: { type: "http", url: snapSelf.url, headers: { Authorization: `Bearer ${snapSelf.token}` } },
-      },
-      // Empty on purpose: everything routes through canUseTool, INCLUDING
-      // mcp__snap__* now (an allowedTools entry skips canUseTool entirely,
-      // which would silently defeat its tabId scoping for snap_capture_tab/
-      // snap_frame_*). NOT 'dontAsk': empirically (see KB-BRIDGE.md mục 7)
-      // 'dontAsk' denies anything outside allowedTools BEFORE canUseTool is
-      // ever consulted. 'default' + canUseTool is what actually routes every
-      // call through canUseTool for a real allow/deny decision. Never
-      // 'bypassPermissions'.
-      allowedTools: [],
-      permissionMode: "default",
-      canUseTool,
-    },
-  });
-  job._query = q;
+  const systemPrompt = [
+    buildSystemPrompt(sessionTabs, allowedOrigins),
+    "",
+    stagePreamble("capture", CAPTURE_ROLE),
+  ].join("\n");
 
-  await consumeStream(q, job, push, {
-    requireWrite: true,
-    onTabId: (id) => { currentTabId = id; push(`(this job's tab is now ${currentTabId})`); },
+  const prompt = findings
+    ? fixPrompt(ctx.review, findings, job.slug)
+    : buildPrompt(ctx.instruction, ctx.markdown, sessionTabs);
+
+  return runStage(job, push, {
+    name: "capture", round, systemPrompt, prompt,
+    mcpServers: {
+      chrome: { type: "http", url: chromeCfg.url, headers: chromeCfg.headers },
+      ...snapServer(snapSelf),
+    },
+    canUseTool,
+    // Only on the first pass. A fix round is allowed to end in an argument:
+    // the prompt tells this stage to say so rather than make a change it does
+    // not believe in, and requiring a write anyway would turn "I think finding
+    // 2 is wrong" into a failed job — which teaches it to make the change.
+    requireAnyOf: round === 0 ? ["mcp__snap__snap_job"] : null,
+    onTabId: (id) => { currentTabId = id; push(`Working in browser tab ${currentTabId}.`); },
   });
 }
 
-/** The message loop, shared by both job kinds. Everything that differs
- *  between an authoring job (browser; must end with an article written) and
- *  a revise job (no browser; may legitimately end having only answered) is
+/* ---- stage 2: write ---------------------------------------------------- */
+
+async function runWriteStage(job, ctx, push, findings, round) {
+  async function canUseTool(toolName, input) {
+    const deny = (message, logLine) => {
+      push(logLine || `Denied — ${doing(toolName, input)}: not the write stage's to do.`);
+      return { behavior: "deny", message };
+    };
+    if (!toolName.startsWith("mcp__snap__")) {
+      return deny(`"${toolName}" is not available to the write stage: no browser, no filesystem. Work from what is in kb/ with the mcp__snap__* tools.`);
+    }
+    if (SNAP_TAB_TOOLS.has(toolName) || (toolName === "mcp__snap__snap_add" && input && input.at)) {
+      return deny(`${toolName} reads a live browser tab and this stage has none. If the article needs a different or better capture, say so in your final message — the review stage routes it to the capture stage, which can re-shoot it.`);
+    }
+    if (toolName === "mcp__snap__snap_findings") {
+      return deny("snap_findings belongs to the review stage. Say what you found in your final message instead.");
+    }
+    if (input && typeof input.slug === "string" && job.slug && input.slug !== job.slug) {
+      return deny(`This job is writing "${job.slug}". Do not touch another article.`);
+    }
+    if (toolName === "mcp__snap__snap_render_job" && input && typeof input.path === "string" && job.slug
+        && !input.path.replace(/\\/g, "/").startsWith(`${job.slug}/`)) {
+      return deny(`This job is writing "${job.slug}" — render ${job.slug}/job.json, not "${input.path}".`);
+    }
+    // The gate that makes "you own the words, not the pictures" real. Compared
+    // against what is on disk right now rather than a snapshot taken at stage
+    // start: the capture stage may have re-rendered between rounds, and the
+    // writer should be measured against the article as it actually is.
+    if (toolName === "mcp__snap__snap_job" && input && input.job) {
+      const disk = readJobJson(input.slug || job.slug);
+      if (disk && visualSignature(disk) !== visualSignature(input.job)) {
+        return deny(
+          "Rejected: this write changes the visual layer (src / out / els / globalEls, or the number or order of steps), which belongs to the capture stage. Write the SAME steps back with only the words changed — title, intro, heading, body, the reader-facing notes, outro. If an annotation really is misplaced, say so in your final message and the review stage will route it to capture.",
+          "Denied — this save changed the annotations, not the words.");
+      }
+    }
+    return { behavior: "allow" };
+  }
+
+  const systemPrompt = [
+    "You are writing the prose of ONE Knowledge Base article that another agent has already photographed and annotated. The images and their annotations are finished; the words are not.",
+    "",
+    readSkillFiles(),
+    "",
+    stagePreamble("write", WRITE_ROLE),
+  ].join("\n");
+
+  const disk = readJobJson(job.slug);
+  const stepList = disk && Array.isArray(disk.steps)
+    ? disk.steps.map((s, i) => `- step ${s.n == null ? i + 1 : s.n}: ${s.heading || "(no heading)"} — image ${s.out || "(none)"}`).join("\n")
+    : "(job.json could not be read from here — read it yourself with snap_job)";
+
+  const prompt = findings
+    ? fixPrompt(ctx.review, findings, job.slug)
+    : [
+      `Write the article "${job.slug}". The capture stage has finished: kb/${job.slug}/job.json holds every step with its captured and annotated images, and each step's \`notes\` is what that agent knew about the screen when it shot it.`,
+      "",
+      "Steps on disk:",
+      stepList,
+      "",
+      "What the user asked for, which is what the article has to deliver:",
+      "",
+      ctx.instruction,
+      ctx.markdown && ctx.markdown.trim()
+        ? `\nReference document the user attached (background — the instruction above is the task):\n\n--- BEGIN REFERENCE ---\n${ctx.markdown}\n--- END REFERENCE ---`
+        : "",
+      "",
+      "Look at every image before you describe it, write the words into job.json, then render.",
+    ].filter(Boolean).join("\n");
+
+  return runStage(job, push, {
+    name: "write", round, systemPrompt, prompt,
+    mcpServers: snapServer(ctx.snapSelf),
+    canUseTool,
+    // First pass only, for the same reason as the capture stage above.
+    requireAnyOf: round === 0 ? ["mcp__snap__snap_render_job", "mcp__snap__snap_write_kb"] : null,
+  });
+}
+
+/* ---- stage 3: review --------------------------------------------------- */
+
+/** Read-only apart from snap_findings (and snap_learn, which appends to the
+ *  playbook and cannot touch the article). An allow-list rather than a
+ *  deny-list on purpose: this stage's whole value is that it cannot quietly fix
+ *  what it finds, and a deny-list springs a leak the next time a tool is added
+ *  to the bridge. */
+const REVIEW_TOOLS = new Set([
+  "mcp__snap__snap_view", "mcp__snap__snap_job", "mcp__snap__snap_kit",
+  "mcp__snap__snap_comments", "mcp__snap__snap_findings", "mcp__snap__snap_learn",
+]);
+
+async function runReviewStage(job, ctx, push, round) {
+  async function canUseTool(toolName, input) {
+    if (!REVIEW_TOOLS.has(toolName)) {
+      push(`Denied — ${doing(toolName, input)}: the review stage reports, it does not fix.`);
+      return {
+        behavior: "deny",
+        message: `"${toolName}" is not available to the review stage. You look and you file: snap_job (read), snap_view, snap_kit, snap_comments, snap_findings, snap_learn. Everything that changes the article belongs to the stage that will be resumed with your findings — file it with snap_findings instead.`,
+      };
+    }
+    if (toolName === "mcp__snap__snap_job" && input && input.job) {
+      push("Denied — editing the article; the review stage reports, it does not fix.");
+      return { behavior: "deny", message: "snap_job is read-only for you: call it with just the slug. Changing an annotation is the capture stage's job — file the finding with owner \"capture\" and it will be resumed to do it." };
+    }
+    if (input && typeof input.slug === "string" && input.slug !== job.slug) {
+      push(`Denied — reading the article "${input.slug}"; this job is reviewing "${job.slug}".`);
+      return { behavior: "deny", message: `This job is reviewing "${job.slug}".` };
+    }
+    return { behavior: "allow" };
+  }
+
+  const systemPrompt = [
+    "You are reviewing ONE Knowledge Base article that two other agents just built: one photographed and annotated the app, another wrote the prose. Neither of them can see it the way its reader will. You can.",
+    "",
+    readSkillFiles(),
+    "",
+    stagePreamble("review", REVIEW_ROLE),
+  ].join("\n");
+
+  const prev = round > 0 ? readReview(job.slug) : null;
+  const prompt = [
+    `Review "${job.slug}" — round ${job._reviewRound}.`,
+    "",
+    "What the user asked for. An article that is beautiful and answers a different question is a finding, not a pass:",
+    "",
+    ctx.instruction,
+    "",
+    prev && prev.findings.length
+      ? [
+        "You filed these last round. Check each one specifically — a finding reported twice is worse than a finding reported once, and a fix that was refused should have been argued, not ignored:",
+        "",
+        formatFindings(prev.findings),
+        "",
+      ].join("\n")
+      : "",
+    "Read the job, look at every image, then file exactly one snap_findings call.",
+  ].filter(Boolean).join("\n");
+
+  await runStage(job, push, {
+    name: "review", round, systemPrompt, prompt,
+    mcpServers: snapServer(ctx.snapSelf),
+    canUseTool,
+    requireAnyOf: ["mcp__snap__snap_findings"],
+  });
+
+  const review = readReview(job.slug);
+  if (review) push(`Review round ${review.round}: ${summarizeReview(review)}${review.summary ? ` ${review.summary}` : ""}`);
+  return review;
+}
+
+/* ---- the pipeline ------------------------------------------------------ */
+
+async function runAuthorPipeline(job, instruction, markdown, sessionTabs, chromeCfg, snapSelf, push) {
+  const allowedOrigins = originsOf(sessionTabs);
+  if (!allowedOrigins.size) throw new Error("none of this job's session tabs have a URL that could be parsed to navigate to.");
+
+  const ctx = { instruction, markdown, sessionTabs, allowedOrigins, chromeCfg, snapSelf, review: null };
+  const running = () => job.status === "running";
+
+  await runCaptureStage(job, ctx, push, null, 0);
+  if (!running()) return;
+  // The capture stage is the only one that can name the article — the slug is
+  // stamped onto the job by noteJobSlug() the first time a write goes through
+  // (server.js's pushKbArticleChanged). Without it there is nothing for the next
+  // two stages to open, and continuing would spend two more sessions
+  // discovering that.
+  if (!job.slug) throw new Error("the capture stage finished without writing a job.json — there is no article for the write stage to work on.");
+
+  await runWriteStage(job, ctx, push, null, 0);
+  if (!running()) return;
+
+  ctx.review = await runReviewStage(job, ctx, push, 0);
+  if (!running()) return;
+
+  for (let round = 1; round <= MAX_FIX_ROUNDS; round++) {
+    const review = ctx.review;
+    if (!review || review.verdict === "pass") break;
+    const forCapture = findingsFor(review, "capture");
+    const forWrite = findingsFor(review, "write");
+    if (!forCapture.length && !forWrite.length) {
+      push("Review asked for changes but filed no findings — stopping rather than looping on nothing.");
+      break;
+    }
+    job._reviewRound = round + 1;
+    // Capture first, then write, then review — in that order every round. A
+    // re-shot image can strand the sentence that described the old one, so the
+    // writer should see the article as it now is; and anything that ordering
+    // still misses is what the next review round is for.
+    if (forCapture.length) {
+      await runCaptureStage(job, ctx, push, forCapture, round);
+      if (!running()) return;
+    }
+    if (forWrite.length) {
+      await runWriteStage(job, ctx, push, forWrite, round);
+      if (!running()) return;
+    }
+    ctx.review = await runReviewStage(job, ctx, push, round);
+    if (!running()) return;
+  }
+
+  const final = ctx.review;
+  const open = final && final.verdict !== "pass" ? final.findings : [];
+  job.stage = null;
+  job.status = "done";
+  job.endedAt = Date.now();
+  // Not an error: the article exists and is rendered. But "done" must not read
+  // as "reviewed clean" when it is not — and the log is the only place the user
+  // sees this, since KB Studio has no view of review.json yet. Spell the
+  // findings out here rather than pointing at a file they would have to go and
+  // open: a budget that ran out silently is how a known defect ships.
+  if (open.length) {
+    push(`Job finished — article written, but ${open.length} finding(s) still open after ${MAX_FIX_ROUNDS} fix round(s):`);
+    for (const line of formatFindings(open).split("\n")) push(line);
+    push(`(also in kb/${job.slug}/review.json)`);
+  } else {
+    push("Job finished — article written and reviewed clean.");
+  }
+}
+
+/** The message loop, shared by every session this file spawns — the three
+ *  authoring stages and the revise job. Everything that differs between them is
  *  in opts rather than in a second copy of this loop.
  *
- *  opts.onTabId is wired for authoring only: canUseTool sees call INPUTS and
- *  never results, so the tabId Chrome Bridge assigned can only be learned
+ *  It REPORTS the outcome ({ ok, error, calledTools }) instead of deciding the
+ *  job's fate, because since the pipeline landed one finished session no longer
+ *  means one finished job: a capture stage ending successfully is the middle of
+ *  the job, and writing job.status = "done" there would have told the UI the
+ *  article was ready before a word of it was written. The caller — a stage in
+ *  runStage(), or runReviseJob() — is the only place that knows which.
+ *
+ *  opts.onTabId is wired for the capture stage only: canUseTool sees call INPUTS
+ *  and never results, so the tabId Chrome Bridge assigned can only be learned
  *  here, off the navigate tool_result (a "user"-role message) streaming past. */
 async function consumeStream(q, job, push, opts = {}) {
   const pendingNavigateIds = new Set();
+  // Which tools this session actually called, so a caller can require the one
+  // that constitutes its output. Counting snap_render_job as well as
+  // snap_write_kb is not a nicety: for a multi-step article the skill RECOMMENDS
+  // job.json + snap_render_job, which calls assembleMarkdown() and writes the
+  // .md itself, and counting only snap_write_kb meant a job that followed the
+  // skill correctly still reported "no article was written" — seen on a real
+  // job whose .md and three PNGs were all sitting in kb/ when it said so.
+  const calledTools = new Set();
+  let outcome = null;
   for await (const msg of q) {
     if (job.status === "cancelled") break;
     // Every message in the stream carries session_id, so take it off the first
@@ -371,15 +833,10 @@ async function consumeStream(q, job, push, opts = {}) {
       for (const block of msg.message.content) {
         if (block.type === "text" && block.text.trim()) push(block.text.trim());
         else if (block.type === "tool_use") {
-          push(`→ ${block.name}(${summarizeInput(block.input)})`);
-          // Both tools write an article's markdown, and for a multi-step
-          // article the skill RECOMMENDS the second one: job.json +
-          // snap_render_job, which calls assembleMarkdown() and writes the .md
-          // itself. Counting only snap_write_kb meant a job that followed the
-          // skill correctly, and left a finished article on disk, still reported
-          // "no article was written" — seen on a real job, whose .md and three
-          // PNGs were all sitting in kb/ when it said so.
-          if (block.name === "mcp__snap__snap_write_kb" || block.name === "mcp__snap__snap_render_job") job._wroteArticle = true;
+          // The arrow stays: KB Studio styles a log line as a tool step by that
+          // prefix (bridge-kb.js's lineClass), and it reads as a bullet.
+          push(`→ ${describeToolUse(block.name, block.input)}`);
+          calledTools.add(block.name);
           if (opts.onTabId && block.name === "mcp__chrome__navigate") pendingNavigateIds.add(block.id);
         }
       }
@@ -392,29 +849,134 @@ async function consumeStream(q, job, push, opts = {}) {
         }
       }
     } else if (msg.type === "result") {
-      if (msg.subtype === "success") {
-        if (opts.requireWrite && !job._wroteArticle) {
-          job.status = "error";
-          job.error = "The session finished without writing an article — neither snap_write_kb nor snap_render_job was called.";
-        } else {
-          job.status = "done";
-        }
-      } else {
-        job.status = "error";
-        job.error = `Session ended: ${msg.subtype}${msg.errors && msg.errors.length ? " — " + msg.errors.join("; ") : ""}`;
-      }
-      job.endedAt = Date.now();
-      push(job.status === "done" ? (opts.doneLine || "Job finished — article written.") : `Job failed: ${job.error}`);
+      outcome = msg.subtype === "success"
+        ? { ok: true, error: null }
+        : { ok: false, error: `session ended: ${msg.subtype}${msg.errors && msg.errors.length ? " — " + msg.errors.join("; ") : ""}` };
     }
   }
-  if (job.status === "running") { job.status = "error"; job.error = "stream ended with no result message."; job.endedAt = Date.now(); }
+  if (!outcome) outcome = { ok: false, error: "stream ended with no result message." };
+  return { ...outcome, calledTools };
 }
 
-function summarizeInput(input) {
+/* ---- the job log ------------------------------------------------------- *
+   What the user watches while a job runs, and for most of a job the ONLY
+   thing they see — the article preview only starts filling in once the first
+   capture lands. It used to be the raw call: "→ mcp__snap__snap_add({"type":
+   "textbox","at":{"selector":"[id=\"812\"]"...". That is the wrong audience:
+   it reads as machinery rather than as work, it buries the one part that
+   differs between two adjacent lines, and the tool name is the least
+   informative token in it. Every line below says what is being DONE, in the
+   vocabulary of the article being built — the same words the skill uses for
+   these steps — so that scanning the log answers "where is it up to" without
+   knowing the tool surface.
+
+   Deliberately not exhaustive on arguments: a log line is a glance, so each
+   case picks the one field that distinguishes this call from the next one of
+   the same kind (which file, which element, which text) and drops the rest. */
+
+const ANNOTATION_NAMES = {
+  step: "step marker", textbox: "text box", highlight: "highlight",
+  spotlight: "spotlight", zoom: "zoom", blur: "privacy blur",
+  arrow: "arrow", label: "label",
+};
+
+function shortText(v, max = 44) {
+  const s = String(v == null ? "" : v).replace(/\s+/g, " ").trim();
+  if (!s) return "";
+  return s.length > max ? `${s.slice(0, max - 1)}…` : s;
+}
+const quoted = (v, max) => (shortText(v, max) ? `“${shortText(v, max)}”` : "");
+/** Path tail, since every image in an article shares the kb/<slug>/img/ head. */
+const fileTail = (p) => String(p || "").split(/[\\/]/).filter(Boolean).slice(-1)[0] || "";
+/** The first key that is actually present — the mcp__chrome__* schemas belong
+ *  to Chrome Bridge, not to this repo, so read them defensively rather than
+ *  assuming a shape that can change under us. */
+function firstOf(input, keys) {
+  for (const k of keys) {
+    const v = input && input[k];
+    if (typeof v === "string" && v.trim()) return v;
+    if (typeof v === "number") return String(v);
+  }
+  return "";
+}
+/** Host + path, no scheme or query — a log line wants the page, not the URL. */
+function shortUrl(url) {
   try {
-    const s = JSON.stringify(input);
-    return s.length > 160 ? s.slice(0, 160) + "…" : s;
-  } catch { return ""; }
+    const u = new URL(url);
+    return shortText(u.host + (u.pathname === "/" ? "" : u.pathname), 56);
+  } catch { return shortText(url, 56); }
+}
+
+const article = (w) => (/^[aeiou]/i.test(String(w)) ? "an" : "a");
+/** The same phrase, lowercased, for embedding mid-sentence — "Denied — adding
+ *  a text box: ..." rather than a capital letter halfway through a line. */
+function doing(name, input) {
+  const s = describeToolUse(name, input);
+  return s.charAt(0).toLowerCase() + s.slice(1);
+}
+
+export function describeToolUse(name, input) {
+  const i = input && typeof input === "object" ? input : {};
+  switch (name) {
+    // --- snap: the article itself ---
+    case "mcp__snap__snap_status":         return "Checking the Snap Studio extension is connected";
+    case "mcp__snap__snap_capture_tab":    return `Snapping the page${i.out ? ` → ${fileTail(i.out)}` : ""}`;
+    case "mcp__snap__snap_open":           return `Opening ${fileTail(i.path) || "the capture"} in the editor`;
+    case "mcp__snap__snap_kit":            return "Reading the annotation kit";
+    case "mcp__snap__snap_add": {
+      const what = ANNOTATION_NAMES[i.type] || i.type || "annotation";
+      const head = `Adding ${article(what)} ${what}`;
+      if (i.at && i.at.toSelector) return `${head} from ${quoted(i.at.selector, 24)} to ${quoted(i.at.toSelector, 24)}`;
+      if (i.at && i.at.selector) return `${head} on ${quoted(i.at.selector, 32)}`;
+      if (i.props && typeof i.props.x === "number") return `${head} at ${Math.round(i.props.x)},${Math.round(i.props.y)}`;
+      return head;
+    }
+    case "mcp__snap__snap_export":         return `Exporting the annotated image${i.out ? ` → ${fileTail(i.out)}` : ""}`;
+    case "mcp__snap__snap_view":           return `Looking at ${fileTail(i.path) || "an image"}${i.grid ? " with the coordinate grid" : ""}`;
+    case "mcp__snap__snap_job":
+      return i.job
+        ? `Saving the article outline — ${(i.job.steps || []).length} step(s) so far`
+        : "Reading the article outline";
+    case "mcp__snap__snap_render_job":     return "Re-rendering every image and the article text";
+    case "mcp__snap__snap_write_kb":       return `Writing the article${i.path ? ` → ${fileTail(i.path)}` : ""}`;
+    case "mcp__snap__snap_comments":       return i.slug ? `Reading the pinned comments on ${i.slug}` : "Checking which articles have comments waiting";
+    case "mcp__snap__snap_comment_resolve":return "Closing a pinned comment";
+    case "mcp__snap__snap_findings": {
+      const n = Array.isArray(i.findings) ? i.findings.length : 0;
+      return `Filing the review — ${i.verdict === "pass" ? "nothing blocking" : `${n} thing(s) to fix`}`;
+    }
+    case "mcp__snap__snap_learn":          return "Adding a learning to the placement playbook";
+
+    // --- snap: reaching into the page, iframes included ---
+    case "mcp__snap__snap_frame_list":     return "Listing the frames on the page";
+    case "mcp__snap__snap_frame_find":     return `Looking for ${quoted(i.text) || "an element"} on the page`;
+    case "mcp__snap__snap_frame_scroll":   return i.selector ? `Scrolling to ${quoted(i.selector, 32)}` : "Scrolling the page";
+    case "mcp__snap__snap_frame_click":    return `Clicking ${quoted(i.selector, 32) || "an element"}`;
+
+    // --- chrome: driving the app ---
+    case "mcp__chrome__navigate":          return `Going to ${shortUrl(i.url)}`;
+    case "mcp__chrome__click":             return `Clicking ${quoted(firstOf(i, ["text", "selector", "element", "ref", "uid"]), 32) || "an element"}`;
+    case "mcp__chrome__fill":
+    case "mcp__chrome__fill_form":         return `Filling in ${quoted(firstOf(i, ["selector", "element", "ref", "name"]), 32) || "the form"}`;
+    case "mcp__chrome__type_text":         return `Typing ${quoted(firstOf(i, ["text", "value"])) || "into the page"}`;
+    case "mcp__chrome__press_key":         return `Pressing ${shortText(firstOf(i, ["key", "keys"]), 16) || "a key"}`;
+    case "mcp__chrome__scroll":            return "Scrolling the page";
+    case "mcp__chrome__find":              return `Looking for ${quoted(firstOf(i, ["text", "query", "selector"])) || "an element"}`;
+    case "mcp__chrome__wait_for":          return `Waiting for ${quoted(firstOf(i, ["text", "selector", "condition"])) || "the page"}`;
+    case "mcp__chrome__take_screenshot":   return "Taking a look at the page";
+    case "mcp__chrome__list_tabs":         return "Listing the open tabs";
+    case "mcp__chrome__switch_tab":        return "Switching browser tab";
+    case "mcp__chrome__close_tab":         return "Closing the browser tab";
+    case "mcp__chrome__resize_window":     return "Resizing the browser window";
+    case "mcp__chrome__chrome_status":     return "Checking the browser bridge";
+    default: {
+      // A tool this map has not caught up with yet — still readable, and it
+      // names itself so the gap is obvious rather than silent.
+      const bare = String(name || "").replace(/^mcp__[a-z-]+__/, "").replace(/_/g, " ").trim();
+      const subject = quoted(firstOf(i, ["slug", "path", "out", "text", "url"]), 32);
+      return `Running ${bare || "a tool"}${subject ? ` on ${subject}` : ""}`;
+    }
+  }
 }
 
 /** Best-effort tabId extraction from an mcp__chrome__navigate tool_result.
@@ -449,7 +1011,7 @@ function extractTabId(content) {
        runs when the browser side is not set up at all.
      - success is not "wrote an article". A revise job that reads the pins and
        answers "step 3's target was never in frame, re-shoot it" did exactly
-       its job while writing nothing — so no _wroteArticle requirement.
+       its job while writing nothing — so no required-output tool.
 
    What it CAN do is the whole fix loop, all of it off files already on disk:
    snap_comments -> snap_job -> snap_render_job (or snap_open/snap_add/
@@ -538,7 +1100,7 @@ export function resetReviseSession(slug) {
 async function runReviseJob(job, instruction, snapSelf, push) {
   async function canUseTool(toolName, input) {
     if (!toolName.startsWith("mcp__snap__")) {
-      push(`Denied ${toolName} — a revise job has no browser and no filesystem.`);
+      push(`Denied — ${doing(toolName, input)}: a revision has no browser and no filesystem.`);
       return {
         behavior: "deny",
         message: `"${toolName}" is not available in a revise job: no browser, no filesystem. Work from what is already in kb/ with the mcp__snap__* tools, or stop and report that a fresh capture is needed.`,
@@ -549,7 +1111,7 @@ async function runReviseJob(job, instruction, snapSelf, push) {
     // in the system prompt teach the "at" selector flow, which is the right
     // answer in an authoring job and impossible in this one.
     if (SNAP_TAB_TOOLS.has(toolName) || (toolName === "mcp__snap__snap_add" && input && input.at)) {
-      push(`Denied ${toolName} — it reads a live browser tab, which this job does not have.`);
+      push(`Denied — ${doing(toolName, input)}: it needs a live browser tab, which this job has none of.`);
       return {
         behavior: "deny",
         message: `${toolName} reads a live browser tab and this job has none. For snap_add, pass explicit x/y props instead of "at" — snap_comments gives you the pin's coordinates in exactly that space. If the article really does need a fresh capture, stop and say so.`,
@@ -594,7 +1156,16 @@ async function runReviseJob(job, instruction, snapSelf, push) {
   };
 
   try {
-    await consumeStream(q, job, push, { doneLine: "Job finished — revision done.", onSessionId });
+    // A revise job IS one session, so unlike a pipeline stage its outcome is the
+    // job's outcome. Success is not "wrote an article": a revise job that reads
+    // the pins and answers "step 3's target was never in frame, re-shoot it" did
+    // exactly its job while writing nothing.
+    const out = await consumeStream(q, job, push, { onSessionId });
+    if (job.status === "cancelled") return;
+    job.status = out.ok ? "done" : "error";
+    job.error = out.ok ? null : out.error;
+    job.endedAt = Date.now();
+    push(out.ok ? "Job finished — revision done." : `Job failed: ${job.error}`);
   } catch (e) {
     // A stored id can go stale (CLI session pruned, machine reimaged). Clear it
     // and say so plainly rather than leaving the user pressing Send into the

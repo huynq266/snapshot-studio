@@ -11,8 +11,20 @@
   window.SnapKit = window.SnapKit || {};
   window.SnapKit.components = window.SnapKit.components || {};
 
+  /** Runtime-only — surface.js loads after every component file. */
+  const scaleOf = (src) => window.SnapKit.surface.scaleOf(src);
+
   function inner(el, ctx) {
-    return `<span class="cmp-label${el.accent ? ' cmp-label--accent' : ''}">${ctx.escapeHtml(el.text)}</span>`;
+    // Unlike step/highlight this component stores no w/h to scale, so its whole
+    // box comes from CSS — which means on a 2560px capture it renders at half the
+    // fraction of the frame the kit drew it at. Overriding padding/type/ring from
+    // the same tokens the vendored rule uses keeps it on the scale while leaving
+    // that rule untouched (the convention every component here follows).
+    const k = scaleOf(ctx.capture);
+    const s = k === 1 ? '' : `font-size:calc(var(--text-xs) * ${k});`
+      + `padding:calc(var(--space-1) * ${1.5 * k}) calc(var(--space-3) * ${k});`
+      + `gap:calc(var(--space-2) * ${k});border-width:${(2 * k).toFixed(2)}px`;
+    return `<span class="cmp-label${el.accent ? ' cmp-label--accent' : ''}" style="${s}">${ctx.escapeHtml(el.text)}</span>`;
   }
   function style(el) {
     return `left:${el.x}px;top:${el.y}px;transform:translate(-50%,-50%)`;

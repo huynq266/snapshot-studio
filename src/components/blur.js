@@ -16,6 +16,13 @@
   // still gets several cells across each axis.
   const BLOCK = 12;
 
+  /** Runtime-only — surface.js loads after every component file. The cell size is
+   *  in SOURCE pixels, so on a 2560px capture a fixed 12px cell is half the size
+   *  it reads as at 1280 and the mosaic starts looking like noise rather than
+   *  deliberate redaction. Scales with the frame, same as every other component's
+   *  chrome (surface.js's uiScale()). */
+  const blockFor = (capture) => BLOCK * window.SnapKit.surface.scaleOf(capture);
+
   /** Two-pass resample, not one: shrink the source region down to one pixel
    *  per mosaic cell first (the browser's own image smoothing averages every
    *  cell's source pixels into that one output pixel), THEN blow that back up
@@ -26,9 +33,10 @@
    *  Returns a data URL (not a live canvas) so it drops straight into
    *  inner()'s string-based background-image — same trick zoom-magnify's own
    *  content() uses for its screenshot crop, just resampled instead of 1:1. */
-  function mosaicDataUrl(imgEl, sx, sy, sw, sh) {
+  function mosaicDataUrl(imgEl, sx, sy, sw, sh, block) {
+    block = block || BLOCK;
     sw = Math.max(1, Math.round(sw)); sh = Math.max(1, Math.round(sh));
-    const smallW = Math.max(1, Math.round(sw / BLOCK)), smallH = Math.max(1, Math.round(sh / BLOCK));
+    const smallW = Math.max(1, Math.round(sw / block)), smallH = Math.max(1, Math.round(sh / block));
     const small = document.createElement('canvas');
     small.width = smallW; small.height = smallH;
     small.getContext('2d').drawImage(imgEl, sx, sy, sw, sh, 0, 0, smallW, smallH);
@@ -57,7 +65,7 @@
     const sw = Math.min(el.w, iw), sh = Math.min(el.h, ih);
     const sx = Math.max(0, Math.min(el.x, iw - sw));
     const sy = Math.max(0, Math.min(el.y, ih - sh));
-    const url = mosaicDataUrl(img.el, sx, sy, sw, sh);
+    const url = mosaicDataUrl(img.el, sx, sy, sw, sh, blockFor(capture));
     return `background-image:url(${url});background-size:100% 100%`;
   }
 

@@ -16,14 +16,25 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import { loadChromeBridgeConfig } from "./chrome-bridge-config.js";
-import { startJob, cancelJob, getCurrentJob, getReviseSession, resetReviseSession, noteJobSlug } from "./kb-job.js";
-import { renderSteps } from "./render.mjs";
-
+import { startJob, cancelJob, getCurrentJob, getReviseSession, resetReviseSession, noteJobSlug, currentReviewRound } from "./kb-job.js";
+import { writeReview, summarizeReview, REVIEW_OWNERS, REVIEW_SEVERITIES } from "./kb-review.js";
+import { renderSteps, renderGridOverlay } from "./render.mjs";
+import { kitRegistry } from "./kit-introspect.js";
+import {
+  uiScaleFor, geometryFor, arrowBetween, isCentreAnchored as isCentreAnchoredIn,
+  elCentre as elCentreIn, checkGeometry as checkGeometryIn,
+} from "./kit-geometry.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");
 const OUT_ROOT = path.resolve(REPO_ROOT, "kb");
 const TOKEN_PATH = path.join(__dirname, ".token");
 const PORT = Number(process.env.SNAP_BRIDGE_PORT || 8788);
+
+/* kit-geometry takes the repo root explicitly (so it stays testable without
+   this server); every call from here is against this one. */
+const isCentreAnchored = (type) => isCentreAnchoredIn(REPO_ROOT, type);
+const elCentre = (el) => elCentreIn(REPO_ROOT, el);
+const checkGeometry = (els, W, H) => checkGeometryIn(REPO_ROOT, els, W, H);
 
 mkdirSync(OUT_ROOT, { recursive: true });
 
@@ -314,18 +325,22 @@ function listKbArticles() {
  *  with the PNG and neither of them says why. A real job spent two full render
  *  passes discovering that. Say it at the write instead. */
 function assertElShapes(job) {
-  for (const [i, s] of job.steps.entries()) {
-    const n = (s && s.n != null) ? s.n : i + 1;
-    for (const el of (s && s.els) || []) {
+  // globalEls is checked on the same terms as a step's own els — it renders
+  // through exactly the same path, so a flat el there fails exactly as silently.
+  const lists = [["globalEls", job.globalEls || []]];
+  for (const [i, s] of job.steps.entries()) lists.push([`step ${(s && s.n != null) ? s.n : i + 1}`, (s && s.els) || []]);
+
+  for (const [where, els] of lists) {
+    for (const el of els) {
       if (!el || typeof el !== "object" || Array.isArray(el) || !el.type) {
-        throw new Error(`step ${n}: every el needs a "type" — got ${JSON.stringify(el)}`);
+        throw new Error(`${where}: every el needs a "type" — got ${JSON.stringify(el)}`);
       }
       // {type} alone is legitimate: a component with nothing overridden.
       const strays = Object.keys(el).filter((k) => k !== "type" && k !== "props");
       if (strays.length) {
         const fixed = { type: el.type, props: Object.fromEntries(strays.map((k) => [k, el[k]])) };
         throw new Error(
-          `step ${n}: els must be [{ type, props: { ... } }] — this one puts ${strays.join(", ")} at the top level, `
+          `${where}: els must be [{ type, props: { ... } }] — this one puts ${strays.join(", ")} at the top level, `
           + `which renders it at the component's default position instead of yours. Write it as ${JSON.stringify(fixed)}`);
       }
     }
@@ -612,20 +627,31 @@ function pngSize(abs) {
   }
 }
 
-/** Where an annotation "is", for the only question asked of it here: which
- *  existing element is this pin about? Mirrors geometryFor()'s per-type x/y
- *  semantics from the other direction — zoom's x/y is ALREADY its centre,
- *  arrow has two endpoints and no single anchor, everything else is a
- *  top-left corner with a box hanging off it. */
-function elCentre(el) {
-  const p = (el && el.props) || {};
-  if (el.type === "arrow") {
-    if (![p.x1, p.y1, p.x2, p.y2].every((n) => typeof n === "number")) return null;
-    return { x: Math.round((p.x1 + p.x2) / 2), y: Math.round((p.y1 + p.y2) / 2) };
+/** checkGeometry against a step's own base capture, sized from the PNG on disk.
+ *  Silent when the base cannot be measured — a missing size is a reason not to
+ *  guess at bounds, not a reason to invent them. */
+function checkStepGeometry(srcAbs, els) {
+  let size = null;
+  try { size = pngSize(srcAbs); } catch { size = null; }
+  return checkGeometry(els, size && size.w, size && size.h);
+}
+
+/** Every step of a job checked at once, formatted for a tool result. Empty
+ *  string when everything is clean, so the caller can append it unconditionally. */
+function geometryReport(job) {
+  const lines = [];
+  for (const [i, s] of (job.steps || []).entries()) {
+    const n = s && s.n != null ? s.n : i + 1;
+    const els = [...(job.globalEls || []), ...((s && s.els) || [])];
+    if (!els.length || !s || !s.src) continue;
+    let problems;
+    try { problems = checkStepGeometry(resolveOut(s.src), els); }
+    catch { continue; }   // unreadable src is snap_render_job's error to raise, not this check's
+    for (const p of problems) lines.push(`  step ${n}: ${p}`);
   }
-  if (typeof p.x !== "number" || typeof p.y !== "number") return null;
-  if (el.type === "zoom") return { x: p.x, y: p.y };
-  return { x: Math.round(p.x + (p.w || 0) / 2), y: Math.round(p.y + (p.h || 0) / 2) };
+  return lines.length
+    ? `\n\nWARNING — geometry problems in this job (nothing is blocked, but these are what a reader sees):\n${lines.join("\n")}`
+    : "";
 }
 
 const NEAREST_ELS = 3;
@@ -828,34 +854,6 @@ function assembleMarkdown(job, mdAbs) {
  *                      from somewhere else, so a single selector cannot say
  *                      where it starts. Left to explicit x1/y1/x2/y2.
  */
-function geometryFor(type, r, pad) {
-  const p = pad == null ? 6 : pad;
-  switch (type) {
-    case "highlight":
-    case "blur":
-    case "spotlight":
-      return { x: r.x - p, y: r.y - p, w: r.w + 2 * p, h: r.h + 2 * p };
-    case "zoom": {
-      // Big enough to show context around the detail, but never smaller than the
-      // component's own default — a zoom tighter than that renders as a crop, not
-      // a magnifier.
-      const size = Math.max(198, Math.round(Math.max(r.w, r.h) * 1.8));
-      return { x: Math.round(r.x + r.w / 2), y: Math.round(r.y + r.h / 2), w: size, h: size };
-    }
-    case "step":
-    case "label":
-      return { x: Math.round(r.x - 12), y: Math.round(r.y - 34) };
-    case "textbox":
-      // Beside the element, not on it (PLACEMENT_PLAYBOOK #1). Caller overrides
-      // x/y via props when the empty space is on the other side.
-      return { x: Math.round(r.x + r.w + 32), y: Math.round(r.y - 24) };
-    case "arrow":
-      return {};
-    default:
-      return { x: Math.round(r.x + r.w / 2), y: Math.round(r.y + r.h / 2) };
-  }
-}
-
 /** Built fresh per HTTP request (see the request handler below) — stateless
  *  Streamable HTTP binds one transport to one server via connect(), and
  *  rebuilding both per request sidesteps any question of whether reusing a
@@ -905,14 +903,51 @@ function buildMcpServer() {
   });
 
   mcp.registerTool("snap_kit", {
-    description: "List the Snap Studio annotation kit components — name, what each is, use_when, and gotchas. Read this before calling snap_add so the right component gets picked instead of guessed.",
+    description: "List the Snap Studio annotation kit components — name, what each is, use_when, gotchas, AND the exact prop names each one reads, its x/y anchor semantics and its default values. Read this before calling snap_add or hand-writing els in job.json: a prop name no component reads is merged onto the element and silently ignored, so it looks like the renderer failed rather than like a typo.",
     inputSchema: {},
   }, async () => {
     const src = readFileSync(path.join(REPO_ROOT, "src", "kit-catalog.js"), "utf8");
     const catalog = JSON.parse(src.slice(src.indexOf("{"), src.lastIndexOf("}") + 1));
-    const summary = catalog.components.map((c) => ({
-      id: c.id, name: c.name, summary: c.summary, use_when: c.use_when, gotchas: c.gotchas || [],
-    }));
+    const reg = kitRegistry(REPO_ROOT) || {};
+    // catalogId is what joins a vendored catalog entry to the component that
+    // implements it (each components/*.js declares its own), so the props below
+    // are that implementation's, not a restatement of the spec.
+    const byCatalogId = {};
+    for (const [type, e] of Object.entries(reg)) {
+      const compSrcId = { "step": "step-marker", "textbox": "text-box", "zoom": "zoom-magnify", "highlight": "highlight-box", "spotlight": "spotlight", "blur": "privacy-blur", "arrow": "arrow", "image": "image" }[type];
+      if (compSrcId) byCatalogId[compSrcId] = { type, ...e };
+    }
+    const ANCHOR_WORDS = {
+      center: "x/y is the CENTRE of this component",
+      topleft: "x/y is the TOP-LEFT corner of this component",
+      "two-point": "no x/y — takes x1/y1 (tail) and x2/y2 (head)",
+      canvas: "the wrapper spans the whole frame; x/y/w/h place the cutout inside it, from its top-left corner",
+    };
+    const summary = catalog.components.map((c) => {
+      const impl = byCatalogId[c.id];
+      const base = { id: c.id, name: c.name, summary: c.summary, use_when: c.use_when, gotchas: c.gotchas || [] };
+      if (!impl) return base;
+      return {
+        ...base,
+        snap_add_type: impl.type,
+        anchor: ANCHOR_WORDS[impl.anchor] || impl.anchor,
+        props: impl.props.filter((p) => p !== "id" && p !== "type"),
+        defaults: impl.defaults,
+      };
+    });
+    // Not in the vendored catalog — Snap Studio's own, and the one an agent
+    // reaches for most often after being told step's number is fixed.
+    for (const type of ["label"]) {
+      const e = reg[type];
+      if (!e) continue;
+      summary.push({
+        id: type, name: "Label", snap_add_type: type,
+        summary: "A small free-standing tag. Not a kit component — Snap Studio adds it because the kit has no small label primitive.",
+        use_when: "A short word or two that is not a numbered step. For a numbered step use step-marker, or text-box in mode:\"step\" when the number has to be a specific one (props.customNumber) — step-marker numbers itself by its position in the element list and cannot be told otherwise.",
+        anchor: ANCHOR_WORDS[e.anchor], props: e.props.filter((p) => p !== "id" && p !== "type"), defaults: e.defaults,
+        gotchas: ["Its pill is solid neutral-900, not the accent + white ring of step-marker — it is a tag, not a step number, and using it for every step throws away the ring that keeps a marker legible over arbitrary screenshot content."],
+      });
+    }
     return text(JSON.stringify(summary, null, 2));
   });
 
@@ -925,8 +960,12 @@ function buildMcpServer() {
         tabId: z.number().int().describe("The tab the capture came from."),
         frameId: z.number().int().optional().describe("Frame the selector lives in (from snap_frame_list). Omit for the top frame."),
         frameUrlContains: z.string().optional().describe("Fallback for frameId: substring of the frame's URL."),
-        pad: z.number().optional().describe("Pixels to grow a highlight/blur/spotlight box beyond the element. Default 6."),
-      }).optional().describe("Bind this annotation to a real element instead of guessing coordinates. The page must still be scrolled the same way it was when snap_capture_tab ran — this reads live positions, not the ones frozen in the image."),
+        pad: z.number().optional().describe("Pixels to grow a highlight/blur/spotlight box beyond the element. Defaults to 6 scaled to the capture's size."),
+        side: z.enum(["left", "right", "top", "bottom"]).optional().describe("Which side of the element to put a step/label/textbox on, or which side an arrow comes in from. Default \"left\" — the empty gutter in an app screenshot is usually on the left. Never overlaps the element on any setting."),
+        toSelector: z.string().optional().describe("arrow only: draw from the element in `selector` to this one instead of from empty space. Both endpoints stop just outside their element."),
+        gap: z.number().optional().describe("arrow only: how far short of the target edge the head stops. Default 14 scaled to the capture."),
+        length: z.number().optional().describe("arrow only, ignored with toSelector: how long the arrow is. Default 150 scaled to the capture."),
+      }).optional().describe("Bind this annotation to a real element instead of guessing coordinates — including arrows, which take `side` (and optionally `toSelector`). The page must still be scrolled the same way it was when snap_capture_tab ran: this reads live positions, not the ones frozen in the image."),
       props: z.record(z.string(), z.any()).optional().describe("Field overrides merged onto the new element, e.g. {\"x\":120,\"y\":80,\"text\":\"Click here\"}. Wins over anything \"at\" computed."),
     },
   }, async ({ type, at, props }) => {
@@ -935,21 +974,46 @@ function buildMcpServer() {
       if (!lastOpened || !lastOpened.width) {
         throw new Error("\"at\" needs the open capture's pixel width, which comes from snap_open — call snap_open first.");
       }
-      const r = await callExtension("frame_rect", {
-        tabId: at.tabId, frameId: at.frameId, frameUrlContains: at.frameUrlContains,
-        selector: at.selector, captureWidth: lastOpened.width,
-      }, 15000);
-      if (!r.inViewport) {
-        throw new Error(`"${at.selector}" is outside the visible viewport right now, so it is not in the captured image either. Scroll to it (snap_frame_scroll), re-capture, then place the annotation.`);
+      const k = uiScaleFor(lastOpened.width);
+      const rectFor = async (selector) => {
+        const r = await callExtension("frame_rect", {
+          tabId: at.tabId, frameId: at.frameId, frameUrlContains: at.frameUrlContains,
+          selector, captureWidth: lastOpened.width,
+        }, 15000);
+        if (!r.inViewport) {
+          throw new Error(`"${selector}" is outside the visible viewport right now, so it is not in the captured image either. Scroll to it (snap_frame_scroll), re-capture, then place the annotation.`);
+        }
+        return r;
+      };
+      const r = await rectFor(at.selector);
+      if (type === "arrow" && at.toSelector) {
+        const to = await rectFor(at.toSelector);
+        computed = arrowBetween(r, to, k);
+        note = ` [at "${at.selector}" → "${at.toSelector}"]`;
+      } else {
+        computed = geometryFor(type, r, at, k, { w: lastOpened.width, h: lastOpened.height });
+        note = ` [at "${at.selector}" → ${r.w}x${r.h} @ ${r.x},${r.y}]`;
       }
-      computed = geometryFor(type, r, at.pad);
-      note = ` [at "${at.selector}" → ${r.w}x${r.h} @ ${r.x},${r.y}]`;
     }
-    const result = await callExtension("add", { type, props: { ...computed, ...(props || {}) } }, 15000);
+    const merged = { ...computed, ...(props || {}) };
+    const result = await callExtension("add", { type, props: merged }, 15000);
     const where = "x1" in result
       ? `from (${result.x1}, ${result.y1}) to (${result.x2}, ${result.y2})`
       : `at (${result.x}, ${result.y})`;
-    return text(`Added ${type} (id: ${result.id}) ${where}.${note}`);
+
+    // Check the element as it actually landed (result carries what the editor
+    // resolved, including defaults this call never named) against the real
+    // capture, so a callout that runs off the frame or lands on its own target
+    // is reported now rather than discovered by eye three steps later — if at
+    // all. See checkGeometry()'s own note on why these are warnings.
+    const placed = { type, props: { ...merged, ...result } };
+    const problems = checkGeometry([placed], lastOpened.width, lastOpened.height);
+    const anchorHint = !at && type !== "arrow" && (props && (props.x != null || props.y != null))
+      ? `\nPlaced from hand-typed coordinates. "at" reads the control's real box and handles this type's x/y semantics for you (${isCentreAnchored(type) ? "x/y is this component's CENTRE" : "x/y is its top-left corner"}) — prefer it whenever the target is a real element.`
+      : "";
+    return text(`Added ${type} (id: ${result.id}) ${where}.${note}`
+      + (problems.length ? `\n\nWARNING — check this before moving on:\n${problems.map((p) => `  - ${p}`).join("\n")}` : "")
+      + anchorHint);
   });
 
   mcp.registerTool("snap_render_job", {
@@ -971,7 +1035,12 @@ function buildMcpServer() {
     const steps = job.steps.map((s, i) => {
       if (!s.src) throw new Error(`step ${s.n ?? i + 1} has no "src" (the captured PNG to draw on)`);
       if (!s.out) throw new Error(`step ${s.n ?? i + 1} has no "out" (where to write the annotated PNG)`);
-      return { srcAbs: resolveOut(s.src), outAbs: resolveOut(s.out), els: s.els || [] };
+      // globalEls first so a per-step annotation can sit on top of a redaction
+      // rather than under it. See its note on the schema in the /kb skill: the
+      // account chip, store name and any other PII sits in the same place on
+      // every shot of the same app, and blurring it per-step is precisely the
+      // job that gets done on step 1 and forgotten on steps 2-8.
+      return { srcAbs: resolveOut(s.src), outAbs: resolveOut(s.out), els: [...(job.globalEls || []), ...(s.els || [])] };
     });
     const rendered = await renderSteps(steps, { scale: scale || 1, accent });
 
@@ -989,7 +1058,7 @@ function buildMcpServer() {
       ...rendered.map((r) => `  ${toKbRel(r.out)} — ${r.width}x${r.height}`),
       `Wrote ${toKbRel(mdAbs)}.`,
       ...(warn ? [`WARNING: ${warn}`] : []),
-    ].join("\n"));
+    ].join("\n") + geometryReport(job));
   });
 
   mcp.registerTool("snap_write_kb", {
@@ -1090,7 +1159,8 @@ function buildMcpServer() {
     // The live surfaces in KB Studio draw straight from this file, so the user
     // sees the element move the moment it is written — no render needed for that.
     pushKbArticleChanged(slug, "snap_job");
-    return text(`Wrote ${toKbRel(abs)} (${job.steps.length} step(s)).${prev} Run snap_render_job to re-render from it.`);
+    return text(`Wrote ${toKbRel(abs)} (${job.steps.length} step(s)).${prev} Run snap_render_job to re-render from it.`
+      + geometryReport(job));
   });
 
   // "Read the exported PNG back and check it" is a hard rule of the placement
@@ -1099,23 +1169,37 @@ function buildMcpServer() {
   // not file://. An agent that cannot see its own output writes "looks good"
   // over a callout hanging off the edge of the image.
   mcp.registerTool("snap_view", {
-    description: "Look at an image under kb/ — returns the actual picture, so you can SEE whether a callout runs off the edge, covers what it points at, or leaves PII visible. Call it on every PNG you export or re-render, before saying the article is done; \"it should be fine\" is not verification. (In Claude Code the built-in Read tool does the same job — this is for sessions with no filesystem access.)",
-    inputSchema: { path: z.string().describe("Image path relative to kb/, e.g. \"img/01-dashboard-annotated.png\"") },
-  }, async ({ path: rel }) => {
+    description: "Look at an image under kb/ — returns the actual picture, so you can SEE whether a callout runs off the edge, covers what it points at, or leaves PII visible. Call it on every PNG you export or re-render, before saying the article is done; \"it should be fine\" is not verification. Pass grid:true to get the same picture with a labelled coordinate grid drawn over it — use that whenever you are about to READ a coordinate off the image rather than just judge it. (In Claude Code the built-in Read tool does the same job — this is for sessions with no filesystem access.)",
+    inputSchema: {
+      path: z.string().describe("Image path relative to kb/, e.g. \"img/01-dashboard-annotated.png\""),
+      grid: z.boolean().optional().describe("Overlay a labelled coordinate grid, in the image's own pixels. Turn this on before estimating any x/y by eye — the picture you are shown is downscaled to fit the model's image budget, so a coordinate measured off it is wrong by that scale factor unless you read it off the grid instead."),
+      step: z.number().optional().describe("Grid spacing in image pixels. Default: 100 on a small image, 200 on a large one."),
+    },
+  }, async ({ path: rel, grid, step }) => {
     const abs = resolveOut(rel);
     if (!existsSync(abs)) throw new Error(`no image at ${toKbRel(abs)}`);
-    const bytes = readFileSync(abs);
+    const ext = path.extname(abs).toLowerCase();
+    let dims = "";
+    let size = null;
+    try { if (ext === ".png") { size = pngSize(abs); dims = ` — ${size.w}x${size.h}`; } } catch {}
+
+    let bytes = readFileSync(abs);
+    let mime = IMAGE_MIME[ext] || "image/png";
+    let note = "";
+    if (grid) {
+      if (!size) throw new Error(`grid needs the image's pixel size, which can only be read from a PNG — ${toKbRel(abs)} is not one.`);
+      const gap = step || (Math.max(size.w, size.h) > 1600 ? 200 : 100);
+      bytes = await renderGridOverlay(abs, size, gap);
+      mime = "image/png";
+      note = `\nGrid: ${gap}px, labelled in the image's OWN pixels (${size.w}x${size.h}). Read x/y off the labels — do NOT scale anything you measure on the rendered picture.`;
+    }
     const MAX_INLINE = 4 * 1024 * 1024;
     if (bytes.length > MAX_INLINE) {
       throw new Error(`${toKbRel(abs)} is ${(bytes.length / 1048576).toFixed(1)}MB — too big to return inline. Re-render it at a smaller scale.`);
     }
-    const ext = path.extname(abs).toLowerCase();
-    const mime = IMAGE_MIME[ext] || "image/png";
-    let dims = "";
-    try { if (ext === ".png") { const s = pngSize(abs); dims = ` — ${s.w}x${s.h}`; } } catch {}
     return {
       content: [
-        { type: "text", text: `${toKbRel(abs)}${dims}` },
+        { type: "text", text: `${toKbRel(abs)}${dims}${note}` },
         { type: "image", data: bytes.toString("base64"), mimeType: mime },
       ],
     };
@@ -1223,7 +1307,51 @@ function buildMcpServer() {
     // A bare output path, with no article attached to it — the UI reads a null
     // slug as "re-read whatever is open", which is the best that can be said here.
     pushKbArticleChanged(slugFromKbRel(out), "snap_export");
-    return text(`Exported ${res.width}x${res.height} to ${toKbRel(absOut)} (headless).${warn ? `\nWARNING: ${warn}` : ""}`);
+    // Checked against what was actually just rendered, not against what was
+    // asked for: hand edits in the editor tab land here too, and this is the
+    // last point before the PNG is on disk and in an article.
+    const problems = checkGeometry(
+      (state.els || []).map((el) => ({ type: el.type, props: el })),
+      lastOpened.width, lastOpened.height,
+    );
+    return text(`Exported ${res.width}x${res.height} to ${toKbRel(absOut)} (headless).${warn ? `\nWARNING: ${warn}` : ""}`
+      + (problems.length ? `\n\nWARNING — geometry problems in this image:\n${problems.map((p) => `  - ${p}`).join("\n")}` : ""));
+  });
+
+  /* The review stage's ONLY write. It has snap_view to look and snap_job to
+     read, and every tool that changes the article is denied to it (see
+     runReviewStage in kb-job.js) — so this is the whole of its output, and the
+     pipeline's next round is built from the file it writes here.
+
+     "owner" is the field that makes the loop work: it routes each finding back
+     to the stage whose judgement produced it, and those two stages are resumed
+     with their own findings only. A reviewer that cannot name an owner has not
+     finished thinking about the finding — which is why the enum is validated in
+     kb-review.js rather than defaulted. */
+  mcp.registerTool("snap_findings", {
+    description: "File this round's review of a KB article: a verdict plus the specific defects found, each routed to the stage that has to fix it. This is the review stage's only write — it cannot re-render, move an annotation, or edit prose, so a defect that is not filed here does not get fixed. Look at every image with snap_view (grid:true when a coordinate has to be READ rather than guessed) before calling. Say what is wrong, why it is wrong, and what to change; \"the callout looks off\" routes to nobody.",
+    inputSchema: {
+      slug: z.string().describe("Article slug being reviewed."),
+      verdict: z.enum(["pass", "changes-requested"]).describe("\"pass\" only when nothing blocking is left — it ends the fix loop and ships the article. It cannot be combined with a blocker finding."),
+      summary: z.string().optional().describe("One or two sentences for the human watching the job log: what state the article is in overall. Not a restatement of the findings."),
+      findings: z.array(z.object({
+        owner: z.enum(REVIEW_OWNERS).describe("\"capture\" for anything visual — a wrong/missing screenshot, or an annotation to move, resize, retype or remove (moving a callout is the same judgement that placed it). \"write\" for prose: headings, body text, intro/outro, a sentence that contradicts the image."),
+        severity: z.enum(REVIEW_SEVERITIES).describe("\"blocker\" = the article is wrong or misleading as it stands (playbook hard rules: overflow, callout over its target, wrong state captured, PII showing). \"nit\" = worth fixing, not worth another round on its own."),
+        step: z.number().int().optional().describe("Step number in job.json this is about, when it belongs to one."),
+        img: z.string().optional().describe("Image path the finding is about, as written in job.json (e.g. \"img/03-shipping-annotated.png\")."),
+        what: z.string().describe("The defect, concretely: which element, which text, where."),
+        why: z.string().optional().describe("The rule or reader-consequence behind it — cite the playbook principle number when there is one."),
+        fix: z.string().describe("What to change. Specific enough that the owning stage does not have to re-derive your reasoning."),
+      })).describe("Empty is a legitimate answer when the verdict is \"pass\"."),
+    },
+  }, async ({ slug, verdict, summary, findings }) => {
+    // The round is the bridge's bookkeeping, not the reviewer's: it is the fix
+    // loop that knows which pass this is, and asking the model to count its own
+    // rounds is asking it to be wrong on the round where it matters.
+    const round = currentReviewRound(slug);
+    const review = writeReview(slug, { verdict, summary, findings, round });
+    pushKbArticleChanged(slug, "snap_findings");
+    return text(`Filed review round ${review.round} for "${slug}": ${summarizeReview(review)}`);
   });
 
   return mcp;

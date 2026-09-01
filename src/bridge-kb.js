@@ -258,6 +258,10 @@
     // ---- log rendering ------------------------------------------------------
     function lineClass(line) {
       if (line.startsWith('→ ')) return 'kb-log-line--tool';
+      // An authoring job runs in three stages (capture -> write -> review, plus
+      // fix rounds); the bridge banners each one, and picking them out of the
+      // scroll is how "where is it up to" gets answered at a glance.
+      if (line.startsWith('— ')) return 'kb-log-line--stage';
       if (line.startsWith('Denied ')) return 'kb-log-line--denied';
       if (line.startsWith('Job finished')) return 'kb-log-line--done';
       if (line.startsWith('Job failed') || line.startsWith('Job crashed')) return 'kb-log-line--error';
@@ -524,6 +528,10 @@
         const inst = await window.SnapKit.kbSurface.mount(wrap, {
           step,
           els: ctx.els(step),
+          // Drawn on every step, owned by the job — see job.globalEls in the /kb
+          // skill. Read-only here: moving it on one step would not move it on the
+          // other seven, and it is nearly always the PII redaction.
+          lockedEls: (ctx.job && ctx.job.globalEls) || [],
           readOnly: ctx.readOnly(),
           onChange: ctx.onChange ? (jobEls) => ctx.onChange(step, jobEls) : null,
         });

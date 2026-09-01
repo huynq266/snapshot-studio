@@ -761,6 +761,7 @@ body.render .kbs-modal { display: none !important; }
 .kb-agent-canvas .kbs-canvas { pointer-events: none; }
 .kb-log-line { padding: 2px 0; white-space: pre-wrap; word-break: break-word; }
 .kb-log-line--tool { color: var(--accent-ink); }
+.kb-log-line--stage { color: var(--ink); font-weight: var(--weight-semibold); margin-top: var(--space-3); }
 .kb-log-line--denied { color: var(--down); }
 .kb-log-line--done { color: var(--color-success-700); font-weight: var(--weight-semibold); }
 .kb-log-line--error { background: var(--color-error-50); color: var(--down); border-radius: var(--radius-sm); padding: 3px 6px; }

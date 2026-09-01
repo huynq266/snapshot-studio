@@ -120,9 +120,13 @@
     elbowCorner,
 
     defaults(c) {
+      // scale multiplies every stroke/head dimension below; 1.5 is the kit's own
+      // weight on a ~1280px frame, so it tracks the capture's width from there
+      // (surface.js's uiScale()).
+      const k = window.SnapKit.surface.scaleOf(c);
       return { x1: c.x - 100, y1: c.y + 70, x2: c.x + 50, y2: c.y - 30,
         shape: 'straight', elbow: 'h-then-v', curvature: 0.22, curveShift: 0,
-        scale: 1.5, secondary: false, origin: false, hideHead: false };
+        scale: 1.5 * k, secondary: false, origin: false, hideHead: false };
     },
 
     inner(el) {
@@ -137,7 +141,8 @@
     propsHtml(el, ctx) {
       const scale = el.scale != null ? el.scale : 1;
       let html = ctx.rowSeg('pShape', 'Path', [['straight', 'Straight'], ['curved', 'Curved'], ['elbow', 'Elbow']], el.shape);
-      html += `<div class="prop-row"><label id="pArrowScaleLabel">Size — ${scale.toFixed(1)}×</label><input type="range" id="pArrowScale" min="0.5" max="3" step="0.1" value="${scale}" style="width:100%"></div>`;
+      const kMax = 3 * window.SnapKit.surface.scaleOf(ctx.capture);
+      html += `<div class="prop-row"><label id="pArrowScaleLabel">Size — ${scale.toFixed(1)}×</label><input type="range" id="pArrowScale" min="0.5" max="${kMax}" step="0.1" value="${scale}" style="width:100%"></div>`;
       html += ctx.rowCheck('pOrigin', 'Anchor dot at the tail', el.origin)
         + ctx.rowCheck('pHideHead', 'Hide the arrowhead — line only', el.hideHead)
         + ctx.note('Elbow when the two ends line up on an axis; curved when they genuinely do not. A diagonal between two aligned points looks careless, and an elbow between two off-axis points looks broken. Drag either end to move its anchor point.'

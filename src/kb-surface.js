@@ -87,9 +87,13 @@
   /** `id` is this session's own handle on an element, minted by newElement() and
    *  meaningless on disk — everything else is the element's actual state. */
   function toJobEls(els) {
-    return els.map((el) => {
+    // `locked` marks an element this step is only DISPLAYING — a job's globalEls,
+    // owned by the job and shared by every step. Writing it back here would copy
+    // it into this step's own els on the next save, and the article would grow a
+    // duplicate redaction per step. See mount()'s lockedEls.
+    return els.filter((el) => !el.locked).map((el) => {
       const props = {};
-      for (const k of Object.keys(el)) { if (k !== 'id' && k !== 'type') props[k] = el[k]; }
+      for (const k of Object.keys(el)) { if (k !== 'id' && k !== 'type' && k !== 'locked') props[k] = el[k]; }
       return { type: el.type, props };
     });
   }
@@ -349,7 +353,7 @@
    *        positioned as a percentage of that box and the click-to-pin handler
    *        measures it, so ONLY the picture goes inside it — the mode toggle is
    *        a sibling, or every existing pin would shift.
-   *  opts  { step, els, readOnly, onChange(jobEls) }
+   *  opts  { step, els, lockedEls, readOnly, onChange(jobEls) }
    *
    *  `els` is the caller's current state for this step, which is not always what
    *  job.json says: the preview is rebuilt from scratch on every keystroke in the
@@ -373,7 +377,13 @@
       img: { dataUrl: img.src, w: img.naturalWidth, h: img.naturalHeight, el: img },
       els: [],
     };
-    capture.els = toElements(opts.els || step.els, capture);
+    // globalEls first: they are the job's shared layer (PII redaction, mostly)
+    // and a per-step annotation should be able to sit on top of one. Marked
+    // locked so the step editor shows them but cannot move them — they belong to
+    // the job, not to this step.
+    const locked = toElements(opts.lockedEls, capture);
+    for (const el of locked) el.locked = true;
+    capture.els = [...locked, ...toElements(opts.els || step.els, capture)];
 
     // ---- DOM ---------------------------------------------------------------
     const built = buildStage(capture);
@@ -457,7 +467,7 @@
       jobEls: () => toJobEls(capture.els),
       /** An agent (or a reload) replaced this step's els underneath us. */
       setJobEls(jobEls) {
-        capture.els = toElements(jobEls, capture);
+        capture.els = [...capture.els.filter((el) => el.locked), ...toElements(jobEls, capture)];
         view.render();
         if (editor) editor.rerender();
       },

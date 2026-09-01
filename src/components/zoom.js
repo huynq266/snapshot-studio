@@ -13,6 +13,20 @@
   window.SnapKit = window.SnapKit || {};
   window.SnapKit.components = window.SnapKit.components || {};
 
+  /** Runtime-only — surface.js loads after every component file. */
+  const scaleOf = (src) => window.SnapKit.surface.scaleOf(src);
+
+  /** Why the default magnification is 2.2 and not the 1.1 this shipped with:
+   *  1.1x is below the threshold where a magnifier reads as a magnifier at all.
+   *  The glass rectangle replaces the pixels underneath it with a near-identical
+   *  copy shifted by a few px, so it looks like a rendering fault — a pale panel
+   *  that clips whatever text it lands on — rather than a detail being enlarged.
+   *  Anything at or under ~1.5x has that problem; 2.2x is the first value where
+   *  the crop is unmistakably bigger than its surroundings. The slider still
+   *  starts at 1.1 for the rare case where a hair more size is genuinely all
+   *  that's wanted. */
+  const DEFAULT_MAGNIFICATION = 2.2;
+
   function minSide(el) { return Math.min(el.w, el.h); }
   /** Clamped px radius — used for the corner-radius handle's position and the
    *  selection outline, both of which need a real number even in circle shape.
@@ -56,8 +70,9 @@
     radiusPx,
 
     defaults(c) {
-      return { x: c.x, y: c.y, w: 198, h: 198, zoom: 1.1, dark: false,
-        shape: 'rect', radius: 22, border: false, borderWidth: 2 };
+      const k = scaleOf(c);
+      return { x: c.x, y: c.y, w: 198 * k, h: 198 * k, zoom: DEFAULT_MAGNIFICATION, dark: false,
+        shape: 'rect', radius: 22 * k, border: false, borderWidth: 2 * k };
     },
 
     inner(el, ctx) {
@@ -65,7 +80,8 @@
       // kit's 24px frame reads fine on the small specimen card in the Components tab,
       // but on an in-place magnify over a live screenshot the frosted rim at that width
       // looks like a blurred border around the content rather than a thin glass edge.
-      return `<div class="cmp-zoom-magnify${el.dark ? ' on-dark' : ''}" style="padding:var(--space-2);border-radius:${radiusCss(el)};box-shadow:${shadow(el)}">${content(el, ctx.capture)}</div>`;
+      const k = scaleOf(ctx.capture);
+      return `<div class="cmp-zoom-magnify${el.dark ? ' on-dark' : ''}" style="padding:calc(var(--space-2) * ${k});border-radius:${radiusCss(el)};box-shadow:${shadow(el)}">${content(el, ctx.capture)}</div>`;
     },
 
     style(el) {
@@ -112,7 +128,7 @@
       }
     },
 
-    demo: { zoom: 1.1, dark: false },
+    demo: { zoom: DEFAULT_MAGNIFICATION, dark: false },
 
     labSpecimen(v, ctx) {
       const inner = ctx.capture

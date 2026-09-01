@@ -85,6 +85,40 @@
 
   function centerXY(capture) { return { x: Math.round(capture.img.w / 2), y: Math.round(capture.img.h / 2) }; }
 
+  /* ---- annotation scale --------------------------------------------------
+     Every component in the kit is specified in absolute pixels — a 28px step
+     pill, a 2.5px highlight border, a 12px label. Those numbers were authored
+     against a ~1280px-wide frame, and they are only correct at that width:
+     the same pill on a 2560px capture (a HiDPI viewport, which is what
+     chrome.tabs.captureVisibleTab returns on any Retina/scaled display) covers
+     half the fraction of the frame it was drawn to cover, and the article that
+     embeds the shot at 800px renders its label at four physical pixels.
+
+     So chrome sizes are scaled by the capture's own width rather than pinned.
+     Deliberately NOT devicePixelRatio: a 1920px 1x capture wants bigger chrome
+     for exactly the same reason a 2560px 2x one does — what matters is how
+     many pixels the frame has, not where they came from. That also means this
+     needs no metadata, no sidecar file and no protocol change: every surface
+     that can render an element (the Snap tab, headless render.mjs, KB Studio's
+     live step images) already has capture.img.w.
+
+     Quarter steps so the number is stable and predictable across the odd
+     window heights a real session produces; clamped at 1 so nothing ever
+     renders SMALLER than the kit spec, and at 3 so a very large shot doesn't
+     get comic-book furniture.
+
+     Geometry — where a box is and how big the region it frames is — is never
+     scaled by this. Only the component's own chrome. */
+  const KIT_REF_WIDTH = 1280;
+  function uiScale(capture) {
+    const w = capture && capture.img && capture.img.w;
+    if (!w) return 1;
+    return Math.min(3, Math.max(1, Math.round((w / KIT_REF_WIDTH) * 4) / 4));
+  }
+  /** uiScale for the capture a component is being rendered/created against.
+   *  `src` is either a capture or a defaults() context ({x, y, capture}). */
+  const scaleOf = (src) => uiScale(src && src.img ? src : (src && src.capture));
+
   /** Dispatches to the component registry (components/*.js). `type` is either a plain
    *  element type ('step', 'highlight', ...) or 'custom:<definitionId>' for something
    *  authored in the Components/Lab tab. Returns null when the definition/component no
@@ -102,9 +136,15 @@
   }
 
   /** zoom's x/y is its center point (style() renders it via translate(-50%,-50%));
-   *  every other box type's x/y is its top-left corner. Centralizing that one
-   *  distinction here lets startBoxPlacement() below draw all four types through
-   *  the same normalized-rect math. */
+   *  the other three draw-to-place types (highlight, spotlight, blur) use their
+   *  top-left corner. Centralizing that one distinction here lets
+   *  startBoxPlacement() below draw all four through the same normalized-rect math.
+   *
+   *  Scope note, because this cost real time once: "every other type is top-left"
+   *  is NOT true of the kit as a whole — step and label are centre-anchored too,
+   *  they simply never reach this function because they are not draw-to-place.
+   *  The authority on any given type is its own style(); snap-bridge reads it back
+   *  rather than restating it (see kit-introspect.js's anchorOf()). */
   function applyDrawnRect(el, x1, y1, x2, y2) {
     const x = Math.min(x1, x2), y = Math.min(y1, y2);
     const w = Math.abs(x2 - x1), h = Math.abs(y2 - y1);
@@ -265,11 +305,11 @@
         if (el.type === 'zoom') { node.dataset.shape = el.shape || 'rect'; setZoomSelRadius(node, el); }
         if (el.type === 'highlight') setHighlightSelRadius(node, el);
         node.innerHTML = elInner(el);
-        if (isBoxEl(el)) {
+        if (isBoxEl(el) && !el.locked) {
           const grip = document.createElement('div'); grip.className = 'handle se'; grip.dataset.h = 'se';
           handleHost(node, el).appendChild(grip);
         }
-        if (el.type === 'zoom') {
+        if (el.type === 'zoom' && !el.locked) {
           const rh = document.createElement('div'); rh.className = 'handle radius'; rh.dataset.h = 'radius';
           positionRadiusHandle(rh, el);
           node.appendChild(rh);
@@ -287,7 +327,7 @@
             node.appendChild(grip);
           }
         }
-        if (isDeletableEl(el)) handleHost(node, el).appendChild(makeDelBtn(el));
+        if (isDeletableEl(el) && !el.locked) handleHost(node, el).appendChild(makeDelBtn(el));
         node.addEventListener('pointerdown', (e) => onElPointerDown(e, el));
         canvas.appendChild(node);
       });
@@ -470,6 +510,12 @@
 
     // ---- drag / resize ---------------------------------------------------
     function onElPointerDown(e, el) {
+      // A locked element is drawn on this surface but owned somewhere else — a
+      // job's globalEls, which every step shares (see kb-surface.js's mount()).
+      // Letting it be dragged here would move it on ONE step and then quietly
+      // discard the change on save, since it is written back to a different
+      // place. Not selectable rather than "selectable but reverted".
+      if (el.locked) return;
       if (e.target.classList.contains('handle') || e.target.classList.contains('arrow-end') || e.target.classList.contains('el-del')) return; // own handlers below
       e.stopPropagation();
       select(el.id);
@@ -624,7 +670,7 @@
   }
 
   SnapKit.surface = {
-    create, newElement, applyDrawnRect, centerXY,
+    create, newElement, applyDrawnRect, centerXY, uiScale, scaleOf, KIT_REF_WIDTH,
     escapeHtml, isTyping, uid,
     catById, catByType, layerIcon, layerName, isBoxEl, isDeletableEl,
     BOX_DRAW_TYPES,

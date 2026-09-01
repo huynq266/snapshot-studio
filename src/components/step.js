@@ -20,9 +20,15 @@
    *  same way zoom.js's shape toggle squares w/h back up on entering circle
    *  shape, so the checkbox still visibly does something before any manual
    *  drag ever happens. */
-  function presetSize(el) {
-    const side = el.video ? 32 : 28;
-    return el.compact ? { w: side, h: side } : { w: el.video ? 96 : 90, h: side };
+  /** Called at runtime only — surface.js loads after every component file, so
+   *  this must never be read at module scope. See its uiScale() comment for why
+   *  a fixed 28px pill is wrong on anything but a ~1280px-wide capture. */
+  const scaleOf = (src) => window.SnapKit.surface.scaleOf(src);
+
+  function presetSize(el, k) {
+    k = k || 1;
+    const side = (el.video ? 32 : 28) * k;
+    return el.compact ? { w: side, h: side } : { w: (el.video ? 96 : 90) * k, h: side };
   }
 
   window.SnapKit.components.step = {
@@ -33,14 +39,21 @@
     isBox: true,
 
     defaults(c) {
-      return { x: c.x, y: c.y, compact: false, video: false, w: 90, h: 28 };
+      const k = scaleOf(c);
+      return { x: c.x, y: c.y, compact: false, video: false, w: 90 * k, h: 28 * k };
     },
 
     inner(el, ctx) {
       const cls = `cmp-step-marker${el.compact ? ' cmp-step-marker--compact' : ''}${el.video ? ' cmp-step-marker--video' : ''}`;
-      const w = el.w || 90, h = el.h || 28;
+      const k = scaleOf(ctx.capture);
+      const w = el.w || 90 * k, h = el.h || 28 * k;
       const fontSize = Math.max(9, Math.round(h * 0.46));
-      return `<span class="${cls}" style="width:${w}px;height:${h}px;font-size:${fontSize}px">${ctx.stepLabel(el, el.compact)}</span>`;
+      // The 2px white ring is the one thing keeping this pill legible over an
+      // arbitrary screenshot (kit-catalog calls it load-bearing, not decorative),
+      // so it scales with the pill instead of thinning out to a hairline on a
+      // large capture. Padding follows for the same reason.
+      return `<span class="${cls}" style="width:${w}px;height:${h}px;font-size:${fontSize}px;`
+        + `border-width:${(2 * k).toFixed(2)}px;padding:0 calc(var(--space-3) * ${k})">${ctx.stepLabel(el, el.compact)}</span>`;
     },
 
     style(el) {
@@ -54,8 +67,9 @@
     },
 
     bindProps(el, ctx) {
-      ctx.on('#pCompact', 'change', (e) => { el.compact = e.target.checked; Object.assign(el, presetSize(el)); ctx.syncNode(el); ctx.renderProps(); });
-      ctx.on('#pVideo', 'change', (e) => { el.video = e.target.checked; Object.assign(el, presetSize(el)); ctx.syncNode(el); ctx.renderProps(); });
+      const k = scaleOf(ctx.capture);
+      ctx.on('#pCompact', 'change', (e) => { el.compact = e.target.checked; Object.assign(el, presetSize(el, k)); ctx.syncNode(el); ctx.renderProps(); });
+      ctx.on('#pVideo', 'change', (e) => { el.video = e.target.checked; Object.assign(el, presetSize(el, k)); ctx.syncNode(el); ctx.renderProps(); });
     },
 
     demo: { compact: false, video: false },
