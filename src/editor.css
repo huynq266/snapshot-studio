@@ -380,12 +380,16 @@ body.render .lab, body.render .library, body.render .kb, body.render .viewtabs {
 .kit-doc p { font-size: var(--text-xs); line-height: 1.6; color: var(--ink-2); margin: var(--space-2) 0 0; }
 
 /* =====================================================================
-   KB TAB — topology B. Rail is a job board: existing kb/ articles, plus a
-   pinned "+ New job" entry that opens the instruction/session-tabs form
-   (its own nested rail + log, same two-column shape the whole tab used to
-   be before the job board existed). Same furniture as the other two tabs
-   (rail + .btn + .empty-hint). Never exported: display:none under
-   body.render, same as .lab.
+   KB TAB — topology B. Rail is a job board with three kinds of entry, and
+   exactly one panel on screen per entry: a pinned "+ New job" (the
+   instruction/session-tabs form), a pinned entry for the job that form
+   spawned (.kb-job-panel — agent canvas, article preview, log), and one
+   per existing kb/ article. Start moves the selection from the first to
+   the second, which is why the run has a panel of its own rather than
+   living in the form's right-hand column: it outlives the form, and the
+   form has nothing left to say once it is running. Same furniture as the
+   other two tabs (rail + .btn + .empty-hint). Never exported:
+   display:none under body.render, same as .lab.
    ===================================================================== */
 .kb { flex: 1; display: grid; grid-template-columns: 220px 1fr; min-height: 0; }
 .kb-rail { background: var(--surface); border-right: 1px solid var(--line); overflow-y: auto; padding: var(--space-4) 14px; }
@@ -396,11 +400,11 @@ body.render .lab, body.render .library, body.render .kb, body.render .viewtabs {
 .kb-main { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 .kb-new-job-panel { flex: 1; display: grid; grid-template-columns: 260px 1fr; min-height: 0; }
 /* Same [hidden]-vs-author-display footgun as .kb-banner above, caught the
-   same way (rendering editor.html and looking): bridge-kb.js toggles this
-   panel and .kb-article-panel via the plain hidden attribute when switching
-   job-board selection, and each one's own unconditional `display` rule
-   otherwise wins over [hidden]'s UA-stylesheet default. */
-.kb-new-job-panel[hidden], .kb-article-panel[hidden] { display: none; }
+   same way (rendering editor.html and looking): bridge-kb.js toggles these
+   three panels via the plain hidden attribute when switching job-board
+   selection, and each one's own unconditional `display` rule otherwise wins
+   over [hidden]'s UA-stylesheet default. */
+.kb-new-job-panel[hidden], .kb-job-panel[hidden], .kb-article-panel[hidden] { display: none; }
 .kb-new-job-form { padding: var(--space-4) 14px; }
 /* Start button sits above the Instruction box, so it owns the gap under it
    (.btn.block's own margin-top would push it off the top of the form), and the
@@ -408,6 +412,14 @@ body.render .lab, body.render .library, body.render .kb, body.render .viewtabs {
    .kb-rail h3:not(:first-child) — it stopped being the form's first child. */
 .kb-new-job-form .kb-start-job { margin: 0 0 var(--space-3); }
 .kb-new-job-form h3:first-of-type { margin-top: 0; }
+/* The other half of the New job panel. The run itself moved to .kb-job-panel,
+   so this column is a short "here is what Start does" block rather than an
+   empty log — narrow and centred, because a paragraph stretched across a
+   1400px pane is not readable prose. */
+.kb-new-job-blurb { min-width: 0; display: flex; flex-direction: column; justify-content: center;
+  gap: var(--space-2); padding: var(--space-4); max-width: 52ch; margin: 0 auto; text-align: center; }
+.kb-new-job-blurb-title { margin: 0; font-size: var(--text-md); font-weight: var(--weight-semibold); color: var(--ink); }
+.kb-new-job-blurb .empty-hint { margin: 0; }
 
 .kb-jobboard { list-style: none; margin: 0 0 var(--space-4); padding: 0; display: flex; flex-direction: column; gap: var(--space-1); }
 .kb-jobboard-new, .kb-jobboard-item { display: block; width: 100%; text-align: left; font-family: inherit; font-size: var(--text-xs);
@@ -419,6 +431,15 @@ body.render .lab, body.render .library, body.render .kb, body.render .viewtabs {
 .kb-jobboard-item-title { display: block; font-size: var(--text-xs); font-weight: var(--weight-semibold); color: var(--ink);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .kb-jobboard-item-meta { display: block; font-size: 10.5px; color: var(--muted); margin-top: 2px; }
+/* The pinned running-job entry. Same card as an article — it is one of the
+   rail's selectable views — plus a status dot, so the rail answers "is
+   anything running" without opening the job screen to find out. Semantic
+   colours, not the accent ramp: "failed" stays red through a rebrand. */
+.kb-jobboard-run[hidden] { display: none; }
+.kb-jobboard-run .kb-jobboard-item-title::before { content: "\25cf"; margin-right: var(--space-1); color: var(--muted); }
+.kb-jobboard-run[data-status="running"] .kb-jobboard-item-title::before { color: var(--color-warning-500); }
+.kb-jobboard-run[data-status="done"] .kb-jobboard-item-title::before { color: var(--color-success-700); }
+.kb-jobboard-run[data-status="error"] .kb-jobboard-item-title::before { color: var(--down); }
 
 /* ---- bridge-down state in the Articles rail ------------------------------
    Warning tones, not error tones: nothing is broken or lost — a process is
@@ -713,6 +734,9 @@ body.render .kbs-modal { display: none !important; }
    the only child and fills the column exactly as it used to. */
 .kb-log-wrap { min-width: 0; min-height: 0; padding: var(--space-4);
   display: flex; flex-direction: column; gap: var(--space-3); }
+/* As its own panel it is the flex:1 child of .kb-main rather than the second
+   column of the New job grid — same inside, different thing filling it. */
+.kb-job-panel { flex: 1; }
 .kb-job-log-wrap { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .kb-log { flex: 1; min-height: 0; overflow-y: auto;
   font-family: var(--mono); font-size: var(--text-xs); line-height: 1.6; background: var(--paper);
