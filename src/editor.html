@@ -252,6 +252,15 @@
       </div>
       <ul class="kb-jobboard">
         <li class="kb-jobboard-new" id="kbJobBoardNew" data-selected="true">+ New job</li>
+        <!-- The job a Start just spawned, pinned right under the form that
+             spawned it (hidden until there is one). NOT an entry in the list
+             below: until the agent names an article there is nothing in kb/ to
+             list, and once it does, this is still the only view that shows the
+             RUN — canvas, preview, log — rather than the finished file. -->
+        <li class="kb-jobboard-item kb-jobboard-run" id="kbJobBoardRun" data-selected="false" hidden>
+          <span class="kb-jobboard-item-title" id="kbJobBoardRunTitle">Job</span>
+          <span class="kb-jobboard-item-meta" id="kbJobBoardRunMeta"></span>
+        </li>
       </ul>
       <ul class="kb-jobboard" id="kbJobBoard"></ul>
     </aside>
@@ -280,43 +289,55 @@
             <ul class="kb-session-list" id="kbSessionCandidateList"><li class="empty-hint">Click refresh to list open tabs.</li></ul>
           </div>
         </aside>
-        <div class="kb-log-wrap" id="kbLogWrap">
-          <!-- Canvas and article side by side, log across the bottom. The two
-               top panes answer different questions about the SAME moment —
-               "what is it doing right now" on the left, "what has it made so
-               far" on the right — so the value is in reading one against the
-               other; stacked, you scrolled between them instead. Both are
-               hidden until a job starts: with nothing running there is nothing
-               to show. See bridge-kb.js's job-preview section. -->
-          <div class="kb-job-panes" id="kbJobPanes">
-            <!-- Left: the agent's own canvas. snap_open/snap_add used to land on
-                 the Snap tab's canvas, which left the user's workspace full of
-                 the agent's captures; it draws here instead, and the Snap tab
-                 holds nothing but what the user put there. This is the step IN
-                 FLIGHT — the finished ones are on the right, drawn from
-                 job.json. See mountAgent() in kb-surface.js. -->
-            <div class="kb-agent-wrap" id="kbAgentWrap" hidden>
-              <div class="kb-job-preview-head">
-                <span class="kb-job-preview-title" id="kbAgentTitle"></span>
-                <button id="kbAgentToSnap" class="btn sm" type="button" hidden title="Copy this capture and its annotations into the Snap tab as a new capture of your own">→ Snap</button>
-              </div>
-              <div class="kb-agent-canvas" id="kbAgentCanvas"></div>
+        <!-- Right of the form while nothing is running: the run itself has its
+             own screen now (.kb-job-panel below), so this half says what Start
+             is about to do instead of showing an empty log to guess at. -->
+        <div class="kb-new-job-blurb">
+          <p class="kb-new-job-blurb-title">Nothing running yet</p>
+          <p class="empty-hint">Fill in the form and hit <strong>Start job</strong>. The view switches to the running job — the agent's canvas, the article as it is built, and its progress log — and this form comes back whenever you pick “+ New job” again.</p>
+        </div>
+      </div>
+      <!-- The running (or last) job's own screen. Start selects it, and the
+           rail entry above brings you back: a job keeps running while you go
+           and read an article, so this has to be somewhere you can return to
+           rather than a half of the form panel that only exists while the form
+           happens to be on screen. -->
+      <div class="kb-log-wrap kb-job-panel" id="kbLogWrap" hidden>
+        <!-- Canvas and article side by side, log across the bottom. The two
+             top panes answer different questions about the SAME moment —
+             "what is it doing right now" on the left, "what has it made so
+             far" on the right — so the value is in reading one against the
+             other; stacked, you scrolled between them instead. Both are
+             hidden until a job starts: with nothing running there is nothing
+             to show. See bridge-kb.js's job-preview section. -->
+        <div class="kb-job-panes" id="kbJobPanes">
+          <!-- Left: the agent's own canvas. snap_open/snap_add used to land on
+               the Snap tab's canvas, which left the user's workspace full of
+               the agent's captures; it draws here instead, and the Snap tab
+               holds nothing but what the user put there. This is the step IN
+               FLIGHT — the finished ones are on the right, drawn from
+               job.json. See mountAgent() in kb-surface.js. -->
+          <div class="kb-agent-wrap" id="kbAgentWrap" hidden>
+            <div class="kb-job-preview-head">
+              <span class="kb-job-preview-title" id="kbAgentTitle"></span>
+              <button id="kbAgentToSnap" class="btn sm" type="button" hidden title="Copy this capture and its annotations into the Snap tab as a new capture of your own">→ Snap</button>
             </div>
-            <!-- Right: the article being built, from kb/<slug>/job.json — which
-                 the agent writes after every captured step — so it fills in long
-                 before any markdown exists. -->
-            <div class="kb-job-preview-wrap" id="kbJobPreviewWrap" hidden>
-              <div class="kb-job-preview-head">
-                <span class="kb-job-preview-title" id="kbJobPreviewTitle"></span>
-                <button id="kbJobPreviewOpen" class="btn sm" type="button" hidden title="Open this article in the editor">Open article →</button>
-              </div>
-              <div class="kb-article-preview kb-job-preview" id="kbJobPreview"></div>
+            <div class="kb-agent-canvas" id="kbAgentCanvas"></div>
+          </div>
+          <!-- Right: the article being built, from kb/<slug>/job.json — which
+               the agent writes after every captured step — so it fills in long
+               before any markdown exists. -->
+          <div class="kb-job-preview-wrap" id="kbJobPreviewWrap" hidden>
+            <div class="kb-job-preview-head">
+              <span class="kb-job-preview-title" id="kbJobPreviewTitle"></span>
+              <button id="kbJobPreviewOpen" class="btn sm" type="button" hidden title="Open this article in the editor">Open article →</button>
             </div>
+            <div class="kb-article-preview kb-job-preview" id="kbJobPreview"></div>
           </div>
-          <div class="kb-job-log-wrap" id="kbJobLogWrap">
-            <div class="kb-log-grip" id="kbLogResize" title="Drag up to make the log taller" hidden>≡</div>
-            <div class="kb-log" id="kbLog"><p class="empty-hint">Write an instruction and add at least one session tab, then hit Start. Progress from the agent — what it navigates to, what it annotates, what it writes — appears here as it happens.</p></div>
-          </div>
+        </div>
+        <div class="kb-job-log-wrap" id="kbJobLogWrap">
+          <div class="kb-log-grip" id="kbLogResize" title="Drag up to make the log taller" hidden>≡</div>
+          <div class="kb-log" id="kbLog"><p class="empty-hint">Progress from the agent — what it navigates to, what it annotates, what it writes — appears here as it happens.</p></div>
         </div>
       </div>
       <div class="kb-article-panel" id="kbArticlePanel" hidden>

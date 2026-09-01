@@ -10,6 +10,13 @@
    KB-BRIDGE.md mục 7 for the full design and snap-bridge/kb-job.js /
    server.js for the other end of this.
 
+   The rail selects between three views, exactly one on screen at a time
+   (showBoardView): "+ New job" — the form; the job that form spawned —
+   agent canvas, article preview and progress log; and an article. Start
+   switches to the job view rather than leaving the user on the form,
+   because from that moment the run is the thing to watch and the form's
+   own inputs are disabled anyway.
+
    Session tabs (kb-session-cmd list/add/remove) are answered locally by
    bridge-worker.js — no round trip to snap-bridge — since it's pure
    chrome.tabs bookkeeping; only kb_start's snapshot of the list travels
@@ -46,6 +53,9 @@
     const banner = $('#kbBanner');
     const boardNewBtn = $('#kbJobBoardNew');
     const boardList = $('#kbJobBoard');
+    const boardRunBtn = $('#kbJobBoardRun');
+    const boardRunTitle = $('#kbJobBoardRunTitle');
+    const boardRunMeta = $('#kbJobBoardRunMeta');
     const bridgeOffline = $('#kbBridgeOffline');
     const bridgeStartBtn = $('#kbBridgeStart');
     const bridgeHint = $('#kbBridgeHint');
@@ -68,6 +78,10 @@
     const articleLog = $('#kbArticleLog');
     const articleLogWrap = $('#kbArticleLogWrap');
     const articleLogResize = $('#kbArticleLogResize');
+    // Also THE running-job view: .kb-log-wrap is one of the KB tab's three
+    // top-level panels now (agent canvas + article preview + log), not the
+    // second column of the New job form, so hiding and showing this element is
+    // how that view is switched in and out.
     const logWrap = $('#kbLogWrap');
     const logResize = $('#kbLogResize');
     const jobPreviewWrap = $('#kbJobPreviewWrap');
@@ -126,6 +140,7 @@
     let jobStatus = 'idle';   // idle | running | done | error | cancelled
     let jobMode = 'author';   // 'author' (+ New job, drives a browser) | 'revise' (prompt box on an article)
     let jobSlug = null;       // the article a revise job is working on
+    let runEntry = null;      // the rail's pinned job entry — {status, title}, or null before the first authoring job. See syncRunEntry().
     let articleHasSession = false;   // the selected article has a conversation the next prompt would continue
     let jobInstruction = null;
     let selectedSlug = null;   // null = "+ New job" panel; otherwise an existing article's slug
@@ -285,7 +300,7 @@
       const el = activeLog();
       el.innerHTML = '';
       if (!lines || !lines.length) {
-        if (el === logEl) el.innerHTML = '<p class="empty-hint">Write an instruction and add at least one session tab, then hit Start. Progress from the agent — what it navigates to, what it annotates, what it writes — appears here as it happens.</p>';
+        if (el === logEl) el.innerHTML = '<p class="empty-hint">Progress from the agent — what it navigates to, what it annotates, what it writes — appears here as it happens.</p>';
         return;
       }
       lines.forEach(appendLine);
@@ -880,8 +895,21 @@
     function confirmDiscard() {
       return !articleDirty || confirm('Discard unsaved changes to this article?');
     }
-    function selectNewJob() {
-      if (!confirmDiscard()) return;
+    /** The rail picks between three views now — the New job form, the running
+     *  job, and an article — and exactly one of them is on screen. Kept in one
+     *  function because each panel carries its own `display` rule, so a missed
+     *  `hidden = true` stacks two views rather than hiding one (editor.css has
+     *  the long version of that footgun). */
+    function showBoardView(view) {
+      newJobPanel.hidden = view !== 'new';
+      logWrap.hidden = view !== 'job';
+      articlePanel.hidden = view !== 'article';
+      boardNewBtn.dataset.selected = view === 'new' ? 'true' : 'false';
+      boardRunBtn.dataset.selected = view === 'job' ? 'true' : 'false';
+    }
+    /** Everything the article panel was holding, dropped in one place so the
+     *  two view-switchers below don't each have to remember all of it. */
+    function leaveArticle() {
       closePopover();
       closeHistoryPanel();
       resetArticleState();
@@ -889,10 +917,23 @@
       articleKind = null;
       articleMdRel = '';
       comments = [];
-      newJobPanel.hidden = false;
-      articlePanel.hidden = true;
-      boardNewBtn.dataset.selected = 'true';
       boardList.querySelectorAll('.kb-jobboard-item').forEach((li) => { li.dataset.selected = 'false'; });
+    }
+    function selectNewJob() {
+      if (!confirmDiscard()) return;
+      leaveArticle();
+      showBoardView('new');
+    }
+    /** The job's own screen: what the agent is doing right now, what it has
+     *  built so far, and what it said. Starting a job lands here — the run is
+     *  the thing to watch, and the form that spawned it has nothing left to
+     *  say — and the pinned rail entry brings you back to it afterwards.
+     *  `force` skips the unsaved-edits guard for the one caller that cannot
+     *  have any: the Start button, on a panel with no article open. */
+    function selectRunningJob(force) {
+      if (!force && !confirmDiscard()) return;
+      leaveArticle();
+      showBoardView('job');
       refreshJobPreview();     // it stopped following the job while it was hidden
     }
     async function selectArticle(slug, title) {
@@ -904,9 +945,7 @@
       articleKind = null;
       articleMdRel = '';
       comments = [];
-      newJobPanel.hidden = true;
-      articlePanel.hidden = false;
-      boardNewBtn.dataset.selected = 'false';
+      showBoardView('article');
       boardList.querySelectorAll('.kb-jobboard-item').forEach((li) => { li.dataset.selected = li.dataset.slug === slug ? 'true' : 'false'; });
       // The prompt log belongs to whichever article its job is revising —
       // don't leave another article's progress hanging under this one.
@@ -1183,9 +1222,10 @@
       // Off screen — the user went to read an article while the job runs.
       // Mounting into a display:none panel measures 0 and paints every capture
       // at its natural 2560px until a resize observation corrects it, which is
-      // a flash of giant pictures on the way back in for no gain. selectNewJob()
-      // refreshes instead, at the moment the panel is on screen again.
-      if (newJobPanel.hidden) return;
+      // a flash of giant pictures on the way back in for no gain.
+      // selectRunningJob() refreshes instead, at the moment the panel is back
+      // on screen.
+      if (logWrap.hidden) return;
       if (jobPreviewBusy) { jobPreviewAgain = true; return; }
       jobPreviewBusy = true;
       const slug = jobPreviewSlug;
@@ -1195,6 +1235,10 @@
         jobPreviewJob = data.job || null;
         jobPreviewDir = mdDirOf(data.mdRel);
         jobPreviewName = (jobPreviewJob && jobPreviewJob.title) || firstHeading(data.md) || slug;
+        // The rail entry started out labelled with the instruction, because at
+        // Start that is all anyone knows about the run. The article's own title
+        // is strictly better, so take it the moment it exists.
+        if (runEntry) setRunEntry({ title: jobPreviewName });
         const n = jobPreviewJob && Array.isArray(jobPreviewJob.steps) ? jobPreviewJob.steps.length : 0;
         const count = `${n} step${n === 1 ? '' : 's'}`;
         jobPreviewTitle.textContent = jobStatus === 'running'
@@ -1233,6 +1277,32 @@
       if (jobPreviewSlug) selectArticle(jobPreviewSlug, jobPreviewName || jobPreviewSlug);
     });
 
+    // ---- the pinned job entry in the rail -----------------------------------
+    // Shown from the moment an authoring job starts (or is picked up on load)
+    // and kept afterwards: the canvas, the preview and the log of the run that
+    // just ended are still the answer to "what did it actually do", and the
+    // article alone does not tell you. A revise job never appears here — its
+    // log belongs under the article panel it was typed into.
+    function syncRunEntry() {
+      boardRunBtn.hidden = !runEntry;
+      if (!runEntry) return;
+      boardRunBtn.dataset.status = runEntry.status;
+      boardRunTitle.textContent = runEntry.title || 'New job';
+      boardRunMeta.textContent = {
+        running: 'Running now', done: 'Finished', error: 'Failed', cancelled: 'Cancelled',
+      }[runEntry.status] || runEntry.status;
+    }
+    function setRunEntry(patch) {
+      runEntry = Object.assign({ status: 'running', title: '' }, runEntry, patch);
+      syncRunEntry();
+    }
+    /** A rail entry is one line wide, and the instruction's opening is enough
+     *  to tell one run from another until the article names itself. */
+    function shortLabel(text) {
+      const t = String(text || '').replace(/\s+/g, ' ').trim();
+      return t.length > 48 ? t.slice(0, 47) + '\u2026' : t;
+    }
+
     // ---- UI state -------------------------------------------------------------
     function updateControls() {
       const running = jobStatus === 'running';
@@ -1253,7 +1323,13 @@
       }[jobStatus] || jobStatus;
       banner.hidden = !running;
     }
-    function setStatus(s) { jobStatus = s; updateControls(); }
+    function setStatus(s) {
+      jobStatus = s;
+      // A revise job's status belongs to the article panel it runs under; the
+      // pinned entry keeps reporting the last authoring run either way.
+      if (jobMode === 'author' && runEntry) setRunEntry({ status: s });
+      updateControls();
+    }
 
     // ---- wiring -----------------------------------------------------------
     instructionInput.addEventListener('input', updateControls);
@@ -1272,6 +1348,7 @@
     });
     sessionRefreshBtn.addEventListener('click', refreshSession);
     boardNewBtn.addEventListener('click', selectNewJob);
+    boardRunBtn.addEventListener('click', () => selectRunningJob());
     articleRefreshBtn.addEventListener('click', () => { if (selectedSlug) selectArticle(selectedSlug, articleTitle.textContent); });
 
     startBtn.addEventListener('click', async () => {
@@ -1297,7 +1374,13 @@
         showJobPreview(true);
         resetAgentCanvas();
         showAgentCanvas(true);
+        // The form has done its job; the run is the thing to watch now. Give it
+        // its own entry in the rail and go there — staying on the form left the
+        // user reading a half-panel of log beside inputs they can no longer
+        // touch, with no sign anything had changed screens.
+        setRunEntry({ status: 'running', title: shortLabel(instruction) });
         setStatus('running');
+        selectRunningJob(true);
         toast('KB job started.');
       } catch (e) {
         toast('Could not start KB job: ' + e.message);
@@ -1441,6 +1524,11 @@
       // the tab mid-job has to find its way back to the preview, which is why
       // the bridge stamps the slug onto the job as soon as an agent names one.
       if (jobMode === 'author') {
+        setRunEntry({ status: job.status, title: shortLabel(job.instruction) });
+        // Reopening or reloading the tab mid-job lands where Start would have
+        // left you. A job that has already ended does not steal the view — its
+        // screen is one click away in the rail.
+        if (job.status === 'running') selectRunningJob(true);
         resetJobPreview();
         showJobPreview(true);
         // NOT reset: the canvas survives a page reload only if nothing clears
