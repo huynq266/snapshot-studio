@@ -257,6 +257,79 @@ người dùng nhập gì thêm, và chỉ áp cho `navigate`, không áp cho c�
   chứng độc lập nhưng hành vi thật của `query()`/format `tool_result` thật của Chrome Bridge thì
   chưa chạy qua.
 
+### Lật lại: job dùng ĐÚNG tab người dùng đưa vào session — `chrome.tabs.group()` chạy SAU khi group ra đời (2026-09-02)
+
+Mục ngay trên chốt "về cấu trúc là không khả thi" và bỏ hẳn hướng dùng tab có sẵn. Kết luận đó
+đúng **với thời điểm đã thử**, không đúng với Chrome API. `chrome.tabs.group({tabIds, groupId})`
+dời một tab **đang mở** vào một group **đang tồn tại** — đúng việc cần. Chỗ hụt là thời điểm: lúc
+người dùng bấm Start, group của job chưa tồn tại, và Chrome xoá group rỗng, nên `"Claude · f7b7"`
+chỉ là **nhãn phiên** cho tới khi Chrome Bridge mở tab đầu tiên của nó. Nói cách khác lần trước
+không thiếu API, chỉ là gọi quá sớm.
+
+**Adopt hai pha** (đường đi hiện tại):
+
+1. Job gọi `mcp__chrome__navigate` **không kèm `tabId`** đúng một lần → Chrome Bridge mở tab của
+   phiên, và chính thao tác đó làm group thành hình. `kb-job.js` đã bắt được `tabId` này sẵn từ
+   trước (`onTabId`, học từ `tool_result` của `navigate`).
+2. snap-bridge gọi xuống extension `adopt_tabs({ jobTabId, tabIds })` → đọc `groupId` từ chính tab
+   đó → `chrome.tabs.group()` kéo các tab session vào group ấy.
+3. Từ đó job truyền thẳng tabId thật của người dùng cho `snap_capture_tab`/`snap_frame_*`/
+   `snap_add`'s `at.tabId`, và Chrome Bridge chấp nhận vì chúng đã nằm trong group của nó.
+
+**Cái được** chính là cái mục 2026-08-28 phải bỏ: không navigate lại nghĩa là giữ nguyên vị trí
+cuộn, panel đang mở, form điền dở — trạng thái người dùng dựng sẵn trước khi bấm Start, thứ trước
+đây mất sạch và phải bắt instruction tả lại bằng lời.
+
+**Quyền: manifest không đổi.** `chrome.tabs.group()`/`ungroup()` và đọc `Tab.groupId` đều nằm
+trong quyền `"tabs"` đã có. Chỉ **namespace** `chrome.tabGroups` (đọc title/màu của group) mới
+cần quyền `"tabGroups"` riêng — không dùng tới, nên không xin.
+
+**Đường lùi còn nguyên.** Tab đã pin (`tabs.group()` từ chối), tab đã đóng từ lúc Start, hay
+adopt lỗi vì bất cứ lý do gì → riêng tab đó rơi về cách cũ: navigate tab của job tới URL rồi tự
+bấm về màn hình cần. System prompt nói rõ **cả hai** đường và `skipped[].reason` từ `adopt_tabs`
+được đẩy thẳng vào job log bằng đúng câu agent cần ("its URL has to be navigated to instead").
+Adopt là nâng cấp, không phải điều kiện tiên quyết — hỏng thì job vẫn chạy như trước.
+
+**Trả tab về chỗ cũ là bắt buộc, không phải dọn dẹp cho gọn.** Tab là của người dùng và nó **dời
+thật** trong thanh tab. Nặng hơn: Chrome Bridge tự dẹp group của nó khi phiên kết thúc, tab còn
+nằm trong đó có thể bị đóng theo — đóng nhầm tab đang đăng nhập của người dùng là hỏng nặng hơn
+mọi thứ tính năng này đem lại. Nên `adoptedTabs` ghi lại `groupId` **trước khi** adopt và
+`release_tabs` đưa về đúng group cũ (không có group cũ thì `ungroup`; group cũ đã biến mất thì
+vẫn `ungroup` — ra ngoài còn hơn kẹt lại). Map này persist qua `chrome.storage.local` cùng lý do
+với `kbSessionTabIds`: service worker MV3 bị giết bất kỳ lúc nào, và một entry mất là một tab kẹt
+trong group của người khác. `startJob()` gọi `release()` trên **mọi** kết cục — xong, lỗi, crash,
+cancel (cancel cũng rơi vào đây vì `cancelJob()` chỉ xin dừng stream, promise vẫn settle).
+
+**Hai cái bẫy đã xử:**
+
+- **Race.** `onTabId` đọc một `tool_result` đang trôi qua — nó **không chặn** agent, nên lệnh tool
+  kế tiếp có thể tới trước khi adopt xong. Vá bằng cách cho `canUseTool` `await adoptPromise`
+  thay vì từ chối: tabId session hợp lệ đúng lúc agent được phép dùng, không phải một cuộc đua.
+- **Mỗi round một group mới.** Mỗi stage/round là một phiên Chrome Bridge mới ⇒ group mới ⇒ adopt
+  của round trước không còn giá trị. `cmdAdoptTabs` vì thế release phần tồn đọng trước rồi mới
+  adopt lại, và vẫn nhớ **group gốc** chứ không phải group của round trước.
+
+**Chốt chặn phía extension**: `cmdAdoptTabs` giao danh sách server gửi với `kbSessionTabIds` của
+chính nó — tức danh sách người dùng thật sự bấm `+` trong rail. Trên thực tế hai bên là một
+(`bridge-kb.js` snapshot từ đúng chỗ đó), nhưng như vậy câu "tab nào được phép dời" luôn trả lời
+được từ thứ người dùng bấm, không phải từ thứ server nói.
+
+**Đã test / chưa test.** `snap-bridge/adopt-tabs.test.mjs` (`npm test` trong `snap-bridge/`) cắt
+khối `cmdAdoptTabs`/`cmdReleaseTabs` ra khỏi `bridge-worker.js` chạy trong `vm` với `chrome.tabs`
+giả — 21 assertion: đường thuận (đi và về đúng group gốc), tab pin bị bỏ qua, tab không có trong
+session bị từ chối **kể cả khi server hỏi**, tab đã đóng bị bỏ qua không làm hỏng tab còn lại, job
+tab không có group thì báo lỗi rõ, round 2 adopt lại vào group mới mà vẫn nhớ nhà, và group gốc
+biến mất thì vẫn thoát ra được. Cắt-rồi-eval xấu hơn import, và là cố ý: `bridge-worker.js` là
+classic service-worker script không export gì, tách nó thành module sẽ là thay đổi lớn hơn nhiều
+so với thứ đang được test.
+
+**Ẩn số còn lại — chưa chạy qua Chrome thật**: Chrome Bridge soát theo *group-membership tại thời
+điểm gọi*, hay theo *danh sách tabId do chính nó mở*? Adopt chỉ đúng ở vế đầu. Bằng chứng gián
+tiếp khá mạnh: mô tả tool `list_tabs` của chính Chrome Bridge nói "drag a tab into the group (or
+use new_tab) to make it visible here" — tức tab được kéo vào group là tab nó chấp nhận. Nếu hoá
+ra sai thì thiệt hại bằng không: `adopt_tabs` trả `skipped`/lỗi, job rơi về đúng hành vi của mục
+2026-08-28.
+
 ### Ảnh chụp bị ám vàng/cam — xác nhận không phải Chrome Bridge, không phải Night Light, nguồn thật chưa chốt (2026-08-28)
 
 Người dùng báo ảnh trong `kb/img/test-01-nav*.png` và `kb/demo-job/01-nav.png` bị dính một lớp

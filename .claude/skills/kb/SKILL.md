@@ -18,15 +18,18 @@ các luật rút ra từ lỗi đã ship thật.
   Kiểm tra bằng `snap_status` → phải trả `{"connected":true}`.
 - **App đang mở sẵn trong Chrome thật, đã đăng nhập.** Pipeline này cố tình chạy trên profile
   thật (xem `KB-BRIDGE.md` 5.2) — không tự đăng nhập hộ.
-- Nếu là topology B (spawn từ UI KB Studio): job **không** có quyền vào tab người dùng đã mở sẵn
-  (mỗi phiên Chrome Bridge luôn có tab group riêng, rỗng). Thay vào đó, gọi
-  `mcp__chrome__navigate` **không kèm `tabId`** để tự mở tab của chính job (cùng profile trình
-  duyệt nên vẫn đăng nhập), điều hướng thẳng tới URL của (các) tab trong session — chỉ được
-  điều hướng trong đúng **origin** của các URL đó, nơi khác bị từ chối. Lấy `tabId` mà `navigate`
-  trả về và dùng đúng giá trị đó cho mọi `snap_capture_tab`/`snap_frame_*`/`snap_add`'s
-  `at.tabId` — các tool này không tự nhận tabId mặc định như `mcp__chrome__*`. `new_tab` luôn bị
-  từ chối — luôn dùng `navigate` kể cả cho trang đầu tiên. Nếu cần một origin không có trong
-  session, dừng lại và báo rõ cần thêm tab nào.
+- Nếu là topology B (spawn từ UI KB Studio): job **dùng đúng các tab người dùng đã đưa vào
+  session**, nhưng phải mở đường trước. Gọi `mcp__chrome__navigate` **không kèm `tabId`** đúng
+  một lần — chính thao tác đó làm tab group của phiên thành hình; ngay sau đó snap-bridge kéo
+  các tab session vào group ấy. Từ đó truyền thẳng **tabId của tab người dùng** cho mọi
+  `snap_capture_tab`/`snap_frame_*`/`snap_add`'s `at.tabId` (các tool này không tự nhận tabId
+  mặc định như `mcp__chrome__*`). Cái được: trang vẫn đang ở đúng chỗ người dùng đã cuộn / mở
+  panel / điền dở trước khi bấm Start — thường đúng là state bài viết cần chụp.
+  **Nếu một tab không dùng được** (đã pin, đã đóng, hoặc log báo không kéo được) thì lùi về
+  cách cũ cho riêng tab đó: navigate tab của chính job tới URL ấy rồi tự bấm về đúng màn hình.
+  Điều hướng chỉ được trong đúng **origin** của các URL trong session, nơi khác bị từ chối;
+  `new_tab` luôn bị từ chối — luôn dùng `navigate` kể cả cho trang đầu tiên. Nếu cần một origin
+  không có trong session, dừng lại và báo rõ cần thêm tab nào.
 
 ## Bộ tool
 
