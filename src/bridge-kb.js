@@ -15,7 +15,9 @@
    agent canvas, article preview and progress log; and an article. Start
    switches to the job view rather than leaving the user on the form,
    because from that moment the run is the thing to watch and the form's
-   own inputs are disabled anyway.
+   own inputs are disabled anyway — and a run that finishes with an article
+   hands straight over to that article's view (finishAuthorRun), because a
+   finished run has nothing left to watch and the article is the result.
 
    Session tabs (kb-session-cmd list/add/remove) are answered locally by
    bridge-worker.js — no round trip to snap-bridge — since it's pure
@@ -139,8 +141,10 @@
     let jobId = null;
     let jobStatus = 'idle';   // idle | running | done | error | cancelled
     let jobMode = 'author';   // 'author' (+ New job, drives a browser) | 'revise' (prompt box on an article)
-    let jobSlug = null;       // the article a revise job is working on
-    let runEntry = null;      // the rail's pinned job entry — {status, title}, or null before the first authoring job. See syncRunEntry().
+    let jobSlug = null;       // the article a revise job is working on — and, once an authoring run hands over, the article that run's log belongs to
+    let jobLog = [];          // the running (or last) job's lines, held apart from the DOM so the log outlives the panel it was painted into. See paintLog().
+    let runHandedOver = false;  // an authoring run whose article has been handed over (finishAuthorRun) — its remaining lines belong under that article now
+    let runEntry = null;      // the rail's pinned job entry — {status, title}, or null: before the first authoring job, and again once a run hands its article over. See syncRunEntry() / finishAuthorRun().
     let articleHasSession = false;   // the selected article has a conversation the next prompt would continue
     let jobInstruction = null;
     let selectedSlug = null;   // null = "+ New job" panel; otherwise an existing article's slug
@@ -228,7 +232,16 @@
         // kb-job.js's own push() prefixes its terminal lines this way (see
         // its lineClass()-matching text below) — the only live signal this
         // UI gets that the job ended on its own, not via the Stop button.
-        if (msg.line.startsWith('Job finished')) { setStatus('done'); refreshJobBoard(); afterReviseFinish(); refreshSessionBadge(); refreshJobPreview(); }
+        if (msg.line.startsWith('Job finished')) {
+          setStatus('done');
+          refreshJobBoard();
+          afterReviseFinish();
+          refreshSessionBadge();
+          // Refresh the preview, then hand over: an authoring run that wrote
+          // an article stops being a screen to watch and becomes that
+          // article, open in the editor. See finishAuthorRun().
+          refreshJobPreview().then(finishAuthorRun);
+        }
         else if (msg.line.startsWith('Job failed') || msg.line.startsWith('Job crashed')) { setStatus('error'); refreshSessionBadge(); refreshJobPreview(); }
       }
     });
@@ -283,27 +296,54 @@
       return '';
     }
     // A revise job's progress belongs in the article panel it was started
-    // from; an authoring job's in the New job panel. Same lines, same classes,
-    // different destination — picked from the RUNNING JOB's mode, not from
-    // whichever panel happens to be on screen, so switching panels mid-job
-    // does not start dropping lines on the floor.
-    function activeLog() { return jobMode === 'revise' ? articleLog : logEl; }
-    function appendLine(line) {
-      const el = activeLog();
+    // from; an authoring job's on the run screen — until that run hands its
+    // article over (finishAuthorRun), after which its remaining lines belong
+    // under the article too, next to the ones that just moved there. An
+    // authoring pipeline does keep talking after "Job finished": the open
+    // findings it could not clear are pushed AFTER that line (kb-job.js), and
+    // they are the half of the log worth reading. Same lines, same classes,
+    // different destination — picked from the RUNNING JOB, not from whichever
+    // panel happens to be on screen, so switching panels mid-job does not
+    // start dropping lines on the floor.
+    /** Where this job's lines are painted right now — or null, when the panel
+     *  they belong to is showing a different article. Nothing is dropped by
+     *  that: jobLog holds every line and both panels repaint from it, which is
+     *  what lets this answer "does the user have this job's article open" now
+     *  rather than the older "which panel does this job own", the one that put
+     *  one article's log under another one's title. */
+    function activeLog() {
+      if (jobMode !== 'revise' && !runHandedOver) return logEl;
+      return jobSlug === selectedSlug ? articleLog : null;
+    }
+    /** Every line goes into jobLog as well as onto the screen, because neither
+     *  panel is a permanent home for it: the article panel is wiped whenever
+     *  another article is opened, and the run screen is retired outright when an
+     *  authoring job hands its article over (finishAuthorRun). Both repaint from
+     *  jobLog instead of showing an empty box for a job that did plenty. */
+    function paintLine(el, line) {
       const p = document.createElement('p');
       p.className = 'kb-log-line ' + lineClass(line);
       p.textContent = line;
       el.appendChild(p);
       el.scrollTop = el.scrollHeight;
     }
-    function renderLog(lines) {
-      const el = activeLog();
+    function paintLog(el, lines) {
       el.innerHTML = '';
       if (!lines || !lines.length) {
         if (el === logEl) el.innerHTML = '<p class="empty-hint">Progress from the agent — what it navigates to, what it annotates, what it writes — appears here as it happens.</p>';
         return;
       }
-      lines.forEach(appendLine);
+      lines.forEach((line) => paintLine(el, line));
+    }
+    function appendLine(line) {
+      jobLog.push(line);
+      const el = activeLog();
+      if (el) paintLine(el, line);
+    }
+    function renderLog(lines) {
+      jobLog = (lines || []).slice();
+      const el = activeLog();
+      if (el) paintLog(el, jobLog);
     }
 
     // ---- session tabs ---------------------------------------------------------
@@ -483,9 +523,30 @@
       const i = s.lastIndexOf('/');
       return i < 0 ? '' : s.slice(0, i + 1);
     }
+    /** One markdown image src as a kb/-relative path — NORMALIZED, with `.` and
+     *  `..` segments resolved away rather than carried along in the string.
+     *
+     *  Concatenating is not enough. An article whose .md lives inside its own
+     *  directory reaches the shared image folder as "../img/x.png", and
+     *  "<slug>/../img/x.png" is the same file as "img/x.png" to everyone except
+     *  a string compare — which is precisely what stepFor() does, and what
+     *  imageCache keys on. The bridge hid the damage: readKbImage() resolves
+     *  through path.resolve(), so the picture still loaded and only the LIVE
+     *  half went missing — the step never matched, no surface was mounted, and
+     *  a fully annotated step image sat there as a flat, unclickable PNG.
+     *
+     *  A `..` that would climb out of kb/ is left in place deliberately: the
+     *  bridge already refuses those (resolveOut), and swallowing them here
+     *  would turn a rejected read into a silently wrong one. */
     function resolveImagePath(rawSrc, dir) {
       if (/^([a-z]+:)?\/\//i.test(rawSrc) || rawSrc.startsWith('data:')) return null;   // remote/data URL — nothing to fetch
-      return (dir || '') + rawSrc.replace(/^\.\//, '');
+      const out = [];
+      for (const seg of ((dir || '') + rawSrc).split('/')) {
+        if (!seg || seg === '.') continue;
+        if (seg === '..' && out.length && out[out.length - 1] !== '..') { out.pop(); continue; }
+        out.push(seg);
+      }
+      return out.join('/');
     }
     /** The job step a markdown image belongs to, matched on the path that step
      *  RENDERS to. Both sides are compared kb/-relative: job.json's src/out are
@@ -514,22 +575,60 @@
      *    readOnly() whether a click on the picture opens the editor
      *    onChange   null for a view; the article's dirty-tracking otherwise
      *    live       false leaves the exported PNG in place and mounts nothing */
+    /** The exported PNG for one wrapper, into its own <img> — from imageCache
+     *  when it is there, from the bridge when it is not. Returns the resolved
+     *  kb/-relative path, or null when the src is not ours to fetch.
+     *
+     *  Split out of hydrateImages() because the two halves have different
+     *  lifetimes. A live surface lasts as long as the preview it was mounted
+     *  into; these bytes only last until something rewrites the file under them,
+     *  which a Save that re-renders steps does on purpose. See repaintPngs(). */
+    async function paintPng(wrap, dir) {
+      const resolved = resolveImagePath(wrap.dataset.src, dir);
+      const img = wrap.querySelector('img');
+      if (!resolved) { wrap.classList.add('kb-md-imgwrap--broken'); return null; }
+      if (!imageCache.has(resolved)) {
+        try {
+          const { dataUrl } = await callBg('read_image', { relPath: resolved });
+          imageCache.set(resolved, dataUrl);
+        } catch (e) {
+          imageCache.set(resolved, null);
+        }
+      }
+      const dataUrl = imageCache.get(resolved);
+      if (dataUrl) {
+        // Guarded, because this runs again over pictures that did not change:
+        // re-assigning the same data: URL is a needless decode of a screenshot.
+        if (img.src !== dataUrl) img.src = dataUrl;
+        wrap.classList.remove('kb-md-imgwrap--broken');
+      } else {
+        wrap.classList.add('kb-md-imgwrap--broken');
+      }
+      return resolved;
+    }
+
+    /** The PNGs on disk have just been rewritten — by a Save that re-rendered
+     *  steps, or by an agent — and every <img> in the preview is still holding
+     *  the OLD bytes, inlined as a data: URL. Nothing on screen says so: the live
+     *  surface redraws itself from job.json the moment an el moves, so the
+     *  picture looks up to date until you flip to `PNG` and find the annotation
+     *  back where it was, and only a reload of the whole article fixed it.
+     *
+     *  Bytes only. The markdown is not re-rendered and no surface is rebuilt, so
+     *  the scroll position, the comment pins and an open step editor all survive
+     *  a Save. Whoever calls this decides what is stale by dropping it from
+     *  imageCache first — everything still cached is left alone. */
+    async function repaintPngs() {
+      const dir = mdDirOf(articleMdRel);
+      await Promise.all(Array.from(articlePreview.querySelectorAll('.kb-md-imgwrap[data-src]'))
+        .map((wrap) => paintPng(wrap, dir)));
+    }
+
     async function hydrateImages(ctx) {
       const wraps = Array.from(ctx.root.querySelectorAll('.kb-md-imgwrap[data-src]'));
       await Promise.all(wraps.map(async (wrap) => {
-        const resolved = resolveImagePath(wrap.dataset.src, ctx.dir);
-        const img = wrap.querySelector('img');
-        if (!resolved) { wrap.classList.add('kb-md-imgwrap--broken'); return; }
-        if (!imageCache.has(resolved)) {
-          try {
-            const { dataUrl } = await callBg('read_image', { relPath: resolved });
-            imageCache.set(resolved, dataUrl);
-          } catch (e) {
-            imageCache.set(resolved, null);
-          }
-        }
-        const dataUrl = imageCache.get(resolved);
-        if (dataUrl) img.src = dataUrl; else wrap.classList.add('kb-md-imgwrap--broken');
+        const resolved = await paintPng(wrap, ctx.dir);
+        if (!resolved) return;
 
         // The rendered PNG above is still fetched and still what the `PNG` toggle
         // shows — it is what the published markdown links to. What goes on screen
@@ -824,14 +923,14 @@
      *  written rather than by a flag any drag sets, so a callout dragged back to
      *  where it started leaves the article clean, and so does re-reading an
      *  agent's change off disk. Returns the step numbers to re-render. */
-    function changedSteps() {
+    function changedStepEntries() {
       if (!articleJob || !Array.isArray(articleJob.steps)) return [];
       return articleJob.steps
         .map((s, i) => ({ s, n: s && s.n == null ? i + 1 : s.n }))
         .filter(({ s }) => s && s.out && stepEls.has(s.out)
-          && JSON.stringify(stepEls.get(s.out)) !== stepSaved.get(s.out))
-        .map(({ n }) => n);
+          && JSON.stringify(stepEls.get(s.out)) !== stepSaved.get(s.out));
     }
+    function changedSteps() { return changedStepEntries().map(({ n }) => n); }
     function refreshDirty() { setDirty(mdDirty || changedSteps().length > 0); }
     /** After a save, or after loading: what is on screen IS what is on disk. */
     function markClean() {
@@ -886,6 +985,10 @@
           const els = stepEls.get(key);
           if (els) inst.setJobEls(els);
         }
+        // setJobEls patches the LIVE view; the exported PNG beside it is a
+        // separate file the agent may also have re-rendered, and nothing else
+        // here would go and re-read it. Same staleness a Save used to leave.
+        repaintPngs();
       }
       setDirty(false);
       refreshComments();
@@ -947,9 +1050,13 @@
       comments = [];
       showBoardView('article');
       boardList.querySelectorAll('.kb-jobboard-item').forEach((li) => { li.dataset.selected = li.dataset.slug === slug ? 'true' : 'false'; });
-      // The prompt log belongs to whichever article its job is revising —
-      // don't leave another article's progress hanging under this one.
-      if (jobSlug !== slug) { articleLog.innerHTML = ''; showArticleLog(false); } else { showArticleLog(true); }
+      // The log belongs to whichever article its job worked on — the one a
+      // revise job is rewriting, or the one a finished authoring run wrote
+      // (finishAuthorRun) — and to no other. Repainted from jobLog rather than
+      // left standing in the DOM: opening any other article in between wipes
+      // this panel, and coming back should not find it empty.
+      if (jobSlug === slug && jobLog.length) { paintLog(articleLog, jobLog); showArticleLog(true); }
+      else { articleLog.innerHTML = ''; showArticleLog(false); paintSavedLog(slug); }
       articleTitle.textContent = title;
       articleEditor.value = 'Loading…';
       articleEditor.disabled = true;
@@ -983,7 +1090,8 @@
       // One Save for both halves of the article. The order matters: the markdown
       // goes first because it is the cheap write, so a failure in the seconds-long
       // re-render below does not also lose the prose.
-      const steps = changedSteps();
+      const changed = changedStepEntries();
+      const steps = changed.map(({ n }) => n);
       if (steps.length) articleSaveNote.textContent = `Re-rendering ${steps.length} image(s)…`;
       try {
         if (mdDirty) await callBg('save_md', { slug: selectedSlug, md: articleEditor.value });
@@ -992,7 +1100,15 @@
           for (const s of job.steps) { if (s && s.out && stepEls.has(s.out)) s.els = stepEls.get(s.out); }
           await callBg('job_save', { slug: selectedSlug, job, rerenderSteps: steps });
           articleJob = job;
-          imageCache.clear();       // the PNGs the `PNG` toggle shows were just rewritten
+          // Only these steps were re-rendered (rerenderSteps above), so only
+          // their PNGs are stale — drop those and read the new bytes back into
+          // the <img> that is already on screen. Emptying the cache alone was
+          // NOT the same thing and was the bug: nothing re-renders the preview
+          // after a Save, so the `PNG` toggle went on showing the picture as it
+          // was before the edit until the whole article was reloaded, while the
+          // live view beside it was already correct.
+          for (const { s } of changed) imageCache.delete(String(s.out).replace(/^\.\//, ''));
+          await repaintPngs();
         }
         markClean();
         toast(steps.length ? `Saved — re-rendered ${steps.length} image(s).` : 'Saved.');
@@ -1179,9 +1295,19 @@
      *  preview does not re-lay-out the moment the real file lands — what you
      *  watched being built is what you get. */
     function jobToMarkdown(job, dir) {
+      /** job.json's `out` is kb/-relative; a markdown image src is relative to
+       *  the .md that carries it. Usually that is just the article directory
+       *  coming off the front — but not when the two diverge: an article whose
+       *  .md sits inside its own directory while its images live in the shared
+       *  kb/img/ has to climb OUT with `../`, and handing the preview the bare
+       *  kb/-relative path there points it at a file that is not on disk. Same
+       *  asymmetry resolveImagePath() bridges on the way back in. */
       const rel = (out) => {
         const clean = String(out).replace(/^\.\//, '');
-        return './' + (dir && clean.startsWith(dir) ? clean.slice(dir.length) : clean);
+        if (!dir) return './' + clean;
+        if (clean.startsWith(dir)) return './' + clean.slice(dir.length);
+        // dir is trailing-slashed (mdDirOf), so its last split element is ''.
+        return '../'.repeat(dir.split('/').length - 1) + clean;
       };
       const lines = [];
       lines.push('# ' + (job.title || job.slug || 'Untitled'), '');
@@ -1279,10 +1405,14 @@
 
     // ---- the pinned job entry in the rail -----------------------------------
     // Shown from the moment an authoring job starts (or is picked up on load)
-    // and kept afterwards: the canvas, the preview and the log of the run that
-    // just ended are still the answer to "what did it actually do", and the
-    // article alone does not tell you. A revise job never appears here — its
-    // log belongs under the article panel it was typed into.
+    // and dropped again the moment that run hands its article over: keeping it
+    // listed the same job twice — once as the pinned run, once as the article
+    // the run had just written — and of those two it is the article you want.
+    // An entry outlives its run only when there is nothing to hand over: a
+    // failed, crashed or cancelled run, or one that ended without naming an
+    // article, where the canvas and the log ARE the only answer to "what did it
+    // actually do". A revise job never appears here — its log belongs under
+    // the article panel it was typed into.
     function syncRunEntry() {
       boardRunBtn.hidden = !runEntry;
       if (!runEntry) return;
@@ -1301,6 +1431,51 @@
     function shortLabel(text) {
       const t = String(text || '').replace(/\s+/g, ' ').trim();
       return t.length > 48 ? t.slice(0, 47) + '\u2026' : t;
+    }
+
+    /** A successful authoring run is over the moment its article exists: that
+     *  article IS the result, so say the run finished and go there, rather than
+     *  leave it pinned in the rail beside the file it just wrote. The run screen
+     *  goes with the entry — nothing can reach it once the entry is gone — so
+     *  its surfaces are released rather than left mounted off screen.
+     *  The hand-off itself only happens with no article open: the user may have
+     *  walked off to read (or edit) something else while the job ran, and a job
+     *  finishing is no reason to yank them out of it. */
+    async function finishAuthorRun() {
+      if (jobMode !== 'author' || jobStatus !== 'done') return;
+      const slug = jobPreviewSlug;
+      if (!slug) return;      // ended without writing an article — keep the run screen
+      // jobPreviewName is only filled in while the run screen is on (the preview
+      // reads nothing into a hidden panel), so go and ask for the title in the
+      // case where the run was watched from somewhere else.
+      let title = jobPreviewName;
+      if (!title) {
+        const data = await callBg('read', { slug }).catch(() => null);
+        if (slug !== jobPreviewSlug) return;      // another job started mid-read
+        title = (data && ((data.job && data.job.title) || firstHeading(data.md))) || slug;
+      }
+      const handOff = !selectedSlug;
+      // The log is the record of how this article got made, and the screen it
+      // was written into is about to go away — so it goes to the article as
+      // well, into the same panel a revise job's log lands in. jobSlug is what
+      // ties the two together (selectArticle).
+      jobSlug = slug;
+      runHandedOver = true;
+      runEntry = null;
+      syncRunEntry();
+      clearJobPreview();
+      jobPreviewSlug = null;
+      showJobPreview(false);
+      resetAgentCanvas();
+      showAgentCanvas(false);
+      paintLog(logEl, []);      // nothing can reach the run screen now; let its lines go
+      toast(handOff
+        ? `Job finished — opening “${title}”, log and all.`
+        : `Job finished — “${title}” is in the list, with its log under it.`);
+      if (handOff) selectArticle(slug, title);
+      // Already reading the article the job was writing: it is the panel the
+      // log just moved into, so put it up without reloading anything.
+      else if (selectedSlug === slug) { paintLog(articleLog, jobLog); showArticleLog(true); }
     }
 
     // ---- UI state -------------------------------------------------------------
@@ -1366,6 +1541,7 @@
         // into the article panel instead of the one the user is looking at.
         jobMode = 'author';
         jobSlug = null;
+        runHandedOver = false;
         jobInstruction = instruction;
         renderLog([]);
         // Open the preview now, empty. Waiting until there is something to show
@@ -1414,6 +1590,9 @@
       if (!selectedSlug) return;
       try {
         await callBg('session', { slug: selectedSlug, reset: true });
+        // The panel closes on the conversation being forgotten, but jobLog is
+        // left alone: it is the record of the last RUN, which is still on disk
+        // either way (kb-log.js), and reopening the article shows it again.
         articleLog.innerHTML = '';
         showArticleLog(false);
         toast('Next prompt starts a new session.');
@@ -1424,6 +1603,27 @@
     });
 
     function showArticleLog(on) { articleLogWrap.hidden = !on; }
+    /** The log the last job on this article left on disk (snap-bridge/kb-log.js),
+     *  for every article whose run this page did not watch: one built weeks ago,
+     *  one whose run happened before a reload, one that has had another job run
+     *  since. Best-effort and asynchronous — an article with no saved log, or a
+     *  bridge too old to answer, simply leaves the panel closed. */
+    async function paintSavedLog(slug) {
+      let log = null;
+      try { ({ log } = await callBg('log_read', { slug })); } catch (e) { return; }
+      if (slug !== selectedSlug) return;      // the user moved on while this was in flight
+      if (!log || !Array.isArray(log.lines) || !log.lines.length) return;
+      // Dated banner first, written in the log's own stage-line vocabulary
+      // ('— …', see lineClass): this is the record of a run that ended, not a
+      // job you are watching now, and the panel gives no other clue which.
+      paintLog(articleLog, [`— ${savedLogHeading(log)}`].concat(log.lines));
+      showArticleLog(true);
+    }
+    function savedLogHeading(log) {
+      const what = { done: 'finished', error: 'failed', cancelled: 'was cancelled' }[log.status] || log.status;
+      const when = log.endedAt ? new Date(log.endedAt).toLocaleString() : 'an earlier run';
+      return `${log.mode === 'revise' ? 'Revision' : 'Build'} ${what} · ${when}`;
+    }
 
     /* Drag the grip at a log's TOP-LEFT to make it taller. The log's bottom is
        pinned to its panel, so the edge that actually moves is the top one:
@@ -1518,12 +1718,22 @@
       mdFilename = job.mdFilename;
       jobInstruction = job.instruction;
       if (jobMode === 'revise') showArticleLog(true);
+      // Same two questions as a live finish: does this run still have a screen,
+      // and where do its lines belong? A run that already handed its article
+      // over has neither a screen nor anything left to say — its log belongs
+      // to the article, and jobSlug + jobLog are what carry it there across the
+      // reload (selectArticle repaints from them).
+      runHandedOver = jobMode === 'author' && job.status === 'done' && !!job.slug;
       renderLog(job.log);
       setStatus(job.status);
       // An authoring job's article outlives the page: reopening or reloading
       // the tab mid-job has to find its way back to the preview, which is why
       // the bridge stamps the slug onto the job as soon as an agent names one.
-      if (jobMode === 'author') {
+      // A run that already handed its article over is not pinned again on load
+      // either: it lives in the article list below now, exactly as it does the
+      // moment it finishes (finishAuthorRun). Everything else — still running,
+      // or ended with nothing to open — keeps its screen, log included.
+      if (jobMode === 'author' && !runHandedOver) {
         setRunEntry({ status: job.status, title: shortLabel(job.instruction) });
         // Reopening or reloading the tab mid-job lands where Start would have
         // left you. A job that has already ended does not steal the view — its

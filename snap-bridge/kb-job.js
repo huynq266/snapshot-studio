@@ -44,6 +44,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadChromeBridgeConfig } from "./chrome-bridge-config.js";
 import { readReview, findingsFor, summarizeReview } from "./kb-review.js";
+import { writeJobLog } from "./kb-log.js";
 
 // Same computation as server.js — not process.cwd(), which depends on how
 // this process happened to be launched and is not guaranteed to be the repo
@@ -275,6 +276,14 @@ export function startJob({ mode, slug, context, instruction, markdown, mdFilenam
     job.error = String((e && e.message) || e);
     job.endedAt = Date.now();
     push(`Job crashed: ${job.error}`);
+  }).finally(() => {
+    // The log outlives the run: KB Studio drops the run's screen the moment the
+    // article exists (bridge-kb.js), so unless this lands on disk beside the
+    // article, "what did the agent actually do here" is answerable only until
+    // the next job starts. Every ending funnels through here — finished,
+    // failed, crashed and cancelled — which is the point: the runs worth
+    // reading back are not the tidy ones. See kb-log.js.
+    writeJobLog(job);
   });
 
   return { id };
@@ -289,6 +298,10 @@ export function cancelJob(id) {
   currentJob.status = "cancelled";
   currentJob.endedAt = Date.now();
   currentJob.log.push("Job cancelled by user.");
+  // Filed here as well as in startJob's finally: the interrupt above unwinds
+  // the agent session on its own schedule, and a cancelled run's log should be
+  // on disk by the time this call answers, not whenever the stream gives up.
+  writeJobLog(currentJob);
   return true;
 }
 
@@ -415,8 +428,13 @@ function fixPrompt(review, findings, slug) {
  *  differs between the three is passed in; what is shared is the resume
  *  bookkeeping, the log banner, and the rule that a stage which finished its
  *  FIRST pass without writing anything down is a failure rather than a quiet
- *  success (requireAnyOf — see the call sites for why fix rounds are exempt). */
-async function runStage(job, push, { name, round, systemPrompt, prompt, mcpServers, canUseTool, requireAnyOf, onTabId }) {
+ *  success (requireAnyOf — see the call sites for why fix rounds are exempt).
+ *
+ *  requireAnyOf asks about the CONVERSATION, requireAfter about the DISK, and a
+ *  stage can pass the first and fail the second: snap_job succeeding is not the
+ *  same fact as kb/<slug>/job.json existing with steps in it. Where the file is
+ *  the deliverable, check the file. */
+async function runStage(job, push, { name, round, systemPrompt, prompt, mcpServers, canUseTool, requireAnyOf, requireAfter, onTabId }) {
   job.stage = name;
   job.round = round;
   push(round
@@ -471,8 +489,10 @@ async function runStage(job, push, { name, round, systemPrompt, prompt, mcpServe
   if (job.status === "cancelled") return out;
   if (!out.ok) throw new Error(`${name} stage: ${out.error}`);
   if (requireAnyOf && !requireAnyOf.some((t) => out.calledTools.has(t))) {
-    throw new Error(`the ${name} stage finished without calling ${requireAnyOf.join(" or ")} — whatever it decided was never written down.`);
+    throw new Error(`the ${name} stage finished without a successful ${requireAnyOf.join(" or ")} call — whatever it decided was never written down.`);
   }
+  const unmet = requireAfter ? requireAfter() : null;
+  if (unmet) throw new Error(`the ${name} stage ${unmet}`);
   return out;
 }
 
@@ -575,6 +595,22 @@ async function runCaptureStage(job, ctx, push, findings, round) {
     // not believe in, and requiring a write anyway would turn "I think finding
     // 2 is wrong" into a failed job — which teaches it to make the change.
     requireAnyOf: round === 0 ? ["mcp__snap__snap_job"] : null,
+    // job.json IS this stage's deliverable, and a successful snap_job call is
+    // not proof of it — a read of a job that already existed counts too. So the
+    // file itself is what gets checked. Without it the annotations survive only
+    // as pixels inside the exported PNGs: KB Studio has no base capture and no
+    // els to draw from, so every step image in the finished article is a flat
+    // picture nobody can move a callout on, and no later job can fix that
+    // without re-placing every annotation by hand. That is not hypothetical —
+    // it is how "quantity-break-overview" shipped.
+    requireAfter: round === 0 ? () => {
+      if (!job.slug) return "finished without ever writing a job.json — no article was named, so there is nothing for the write stage to describe.";
+      const j = readJobJson(job.slug);
+      if (!j || !Array.isArray(j.steps) || !j.steps.length) {
+        return `finished with no usable kb/${job.slug}/job.json — the captures and their annotations have to be written there with snap_job (title, slug, steps[] each with src/out/els), not left inside the exported PNGs.`;
+      }
+      return null;
+    } : null,
     onTabId: (id) => { currentTabId = id; push(`Working in browser tab ${currentTabId}.`); },
   });
 }
@@ -821,7 +857,16 @@ async function consumeStream(q, job, push, opts = {}) {
   // .md itself, and counting only snap_write_kb meant a job that followed the
   // skill correctly still reported "no article was written" — seen on a real
   // job whose .md and three PNGs were all sitting in kb/ when it said so.
+  //
+  // Recorded when the RESULT comes back and only if it is not an error, not the
+  // moment the call goes out. requireAnyOf reads "whatever it decided was never
+  // written down", and a call that threw wrote nothing down: a capture stage
+  // that asked snap_job for a job.json which did not exist yet, got the error,
+  // and then went off and built the whole article without one used to satisfy
+  // requireAnyOf on the strength of having typed the tool's name. A denial from
+  // canUseTool comes back the same way and is discounted for the same reason.
   const calledTools = new Set();
+  const pendingCalls = new Map();      // tool_use id -> name, until its result lands
   let outcome = null;
   for await (const msg of q) {
     if (job.status === "cancelled") break;
@@ -836,13 +881,19 @@ async function consumeStream(q, job, push, opts = {}) {
           // The arrow stays: KB Studio styles a log line as a tool step by that
           // prefix (bridge-kb.js's lineClass), and it reads as a bullet.
           push(`→ ${describeToolUse(block.name, block.input)}`);
-          calledTools.add(block.name);
+          pendingCalls.set(block.id, block.name);
           if (opts.onTabId && block.name === "mcp__chrome__navigate") pendingNavigateIds.add(block.id);
         }
       }
     } else if (msg.type === "user" && msg.message && Array.isArray(msg.message.content)) {
       for (const block of msg.message.content) {
-        if (block.type === "tool_result" && pendingNavigateIds.has(block.tool_use_id)) {
+        if (block.type !== "tool_result") continue;
+        const name = pendingCalls.get(block.tool_use_id);
+        if (name) {
+          pendingCalls.delete(block.tool_use_id);
+          if (!block.is_error) calledTools.add(name);
+        }
+        if (pendingNavigateIds.has(block.tool_use_id)) {
           pendingNavigateIds.delete(block.tool_use_id);
           const tabId = extractTabId(block.content);
           if (tabId != null) opts.onTabId(tabId);

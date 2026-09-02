@@ -119,6 +119,16 @@
     deletable: false,
     elbowCorner,
 
+    // The three constants above, published for code that has to reason about an
+    // arrow WITHOUT drawing it — snap-bridge/kit-geometry.js decides how long an
+    // anchored arrow should be, and the only honest unit for that is the head:
+    // at the default weight on a 2560px capture the head alone is already 42px,
+    // so "150px" is a stub there and a sensible arrow on a 1280px shot. Exposed
+    // rather than restated in the bridge for the same reason kit-introspect
+    // reads anchors back out of style(): a second copy of a number is a number
+    // that drifts.
+    metrics: { HEAD_BASE, HEAD_LENGTH, SHAFT_TRIM },
+
     defaults(c) {
       // scale multiplies every stroke/head dimension below; 1.5 is the kit's own
       // weight on a ~1280px frame, so it tracks the capture's width from there

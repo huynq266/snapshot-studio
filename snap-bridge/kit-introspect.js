@@ -107,6 +107,10 @@ function introspect(repoRoot) {
       // Whether w/h are part of the contract at all — used to decide if a
       // missing size can be filled in from the defaults when checking bounds.
       sizedByProps: typeof defaults.w === "number",
+      // Geometry constants a component chooses to publish (arrow.js's head and
+      // shaft sizes, so kit-geometry can measure an arrow against its own head
+      // instead of against a pixel count copied out of that file).
+      metrics: comp.metrics && typeof comp.metrics === "object" ? { ...comp.metrics } : null,
     };
   }
   return Object.keys(out).length ? out : null;

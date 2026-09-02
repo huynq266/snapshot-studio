@@ -51,7 +51,7 @@ prop; đọc file này để đặt. Đừng chép lẫn nhau, và đừng đoá
 | `textbox` | **góc trên-trái** (chiều cao tự co theo nội dung) | `w: 280` |
 | `zoom` | **TÂM** (`src/components/zoom.js` `style()`) | `198 × 198`, `zoom: 2.2` |
 | `step` | **TÂM** (`src/components/step.js:46`) | `90 × 28` |
-| `label` | **TÂM** (`src/components/label.js`) | tự co theo chữ |
+| `label` | **TÂM** (`src/components/label.js`) | tự co theo chữ: rộng `7.2k × số ký tự + 28k`, cao `28k` |
 | `highlight` / `spotlight` | góc trên-trái | `180 × 48` |
 | `blur` | góc trên-trái | `180 × 32` |
 | `arrow` | dùng `x1/y1/x2/y2`, **không** có `x/y` | — |
@@ -92,7 +92,8 @@ arrow là type duy nhất buộc phải gõ tay, và đó là lý do mọi bài 
 600px cắt ngang vùng trống rồi đâm vào giữa cái khung nó trỏ tới.
 
 `at` nhận thêm: `side` (`left`/`right`/`top`/`bottom` — bỏ trống thì tự chọn phía **còn đủ
-chỗ**, không phải mặc định cứng), `pad`, `gap`, `length`.
+chỗ**, không phải mặc định cứng), `pad`, `gap`, `fromId` (riêng arrow: id của callout mà mũi
+tên xuất phát), `length` (riêng arrow — **gần như không bao giờ cần**, xem #1b).
 
 Chỉ gõ `props.x/y` khi thật sự không có element nào để neo (callout đặt giữa vùng trắng).
 Khi đó: đọc bảng ngữ nghĩa `x/y` ở trên, và **đọc toạ độ bằng `snap_view({path, grid:true})`
@@ -133,6 +134,46 @@ nối bằng `arrow`. Nếu callout nằm chồng lên chính thứ người đ�
 
 > **LEARNING 2026-08-28** — cùng bài KB đó: Step 5 đặt đè lên link "more products" trong
 > vùng preview, che mất chính nội dung đang mô tả.
+
+### 1b. Độ dài mũi tên là **hệ quả**, không phải con số bạn chọn. (từ 2026-09-02)
+
+Mũi tên trong bài KB luôn nối **hai thứ đã có trên ảnh**: callout của bước đó
+(`label`/`step`/`textbox`) và target nó trỏ tới. Khoảng cách giữa hai thứ đó là một **số đo**,
+không phải thứ để gõ tay. Gõ tay thì sai cả hai chiều — và đã sai đúng như vậy trong **cùng
+một bài đã ship**:
+
+- **Dài quá** — đuôi gõ "quá mép pill một chút" thật ra nằm **trong** pill (pill của `label`
+  tự co theo chữ; ở ảnh 2560 nó rộng gấp 2–3 lần cảm giác bằng mắt), nên thân mũi tên vẽ
+  xuyên qua chính chữ của label. Hoặc callout bị đỗ ở một chỗ cố định trong máng trống và mũi
+  tên phải kéo **540px = 21% bề ngang ảnh** mới với tới.
+- **Ngắn quá** — đuôi gõ sát ngay cạnh pill: cả mũi tên chỉ 160px trong khi riêng **đầu mũi đã
+  42px** (ảnh 2560, `scale` mặc định `1.5 × k` = 3). Nhìn ra một tam giác mập có cái cuống,
+  không ra mũi tên.
+
+**Cách làm đúng — đặt cặp callout + arrow trên cùng một target, để `at` tự tính:**
+
+```
+snap_add({ type: "label", at: { selector, tabId }, props: { text: "Bước 3: …" } })
+snap_add({ type: "arrow", at: { selector, tabId } })     // đuôi tự bám vào label vừa đặt
+```
+
+Thứ tự nào cũng được: đặt `arrow` trước thì `label`/`step`/`textbox` sau đó rơi đúng vào **đuôi
+mũi tên**. Kết quả cố định: đầu mũi dừng `14k` trước mép target, đuôi cách pill `14k`, thân dài
+`4.5 × chiều dài đầu mũi` — và **mọi mũi tên trong bài dài bằng nhau**, dù chữ trong label dài
+ngắn thế nào. (Vì vậy callout neo bằng `at` giờ đứng cách mép target đúng một mũi tên tối
+thiểu, chứ không sát mép như trước.)
+
+- Nhiều callout cùng một phía → chỉ đích danh bằng `at.fromId` (id `snap_add` trả về khi thêm
+  callout đó).
+- Không có callout nào phía sau → độ dài rơi về mặc định `150k`, **cắt theo chỗ trống thật**
+  của phía đó nên không bao giờ tràn mép.
+- `at.length` chỉ dùng khi không có callout để bám **và** độ dài tự tính vẫn sai. Gõ `length`
+  chính là cách sinh ra hai lỗi ở trên.
+
+Kiểm tra hình học (`snap_add` / `snap_job` / `snap_render_job`) giờ bắt cả bốn dạng: đuôi nằm
+**trong** callout (báo kèm số `x1` đúng), thân **vẽ xuyên qua** callout, mũi tên ngắn hơn
+`4.5 ×` đầu mũi, và mũi tên vượt **18% bề ngang ảnh** (dấu hiệu callout bị đỗ sai chỗ — sửa
+callout, đừng sửa mũi tên).
 
 ### 2. Xác minh target TỒN TẠI, HIỆN RÕ, ĐÚNG STATE trong ẢNH NÀY — trước khi đặt. (hard rule)
 
@@ -333,3 +374,19 @@ không ghi thì bài học chết theo cái pin.)*
 - **2026-08-30** — ⚠️ **SUPERSEDED — xem ĐÍNH CHÍNH ở trên. `title` (mode:"step") và `label` (mode:"note") ĐỀU hoạt động.** — 2026-08-30 — textbox component (mode:"note") ignores any prop named text/note/title/heading for its content — only `body` is respected for the message; the header title is hard-coded to "Tip" and cannot be overridden by any prop name tried (title, heading). Same class of bug as the step-marker's fixed "Step 1" numeral (2026-08-30 learning). WORKAROUND: just write the note's message via props.body and accept the English "Tip" header even in a non-English article — don't burn more than 1-2 prop-name guesses on the header text next time.
 
 - **2026-08-30** — 2026-08-30 — job.json steps[].els items must nest all annotation fields under a "props" key ({type, props:{x,y,...}}), matching snap_add's own {type, props} shape. Writing them flat ({type, x, y, text, ...} as siblings, no props wrapper) is silently accepted by snap_job/snap_render_job with no error, but the renderer then ignores every field and falls back to each component's hardcoded demo defaults (blur/highlight/zoom disappear entirely, textbox/label/step render the canned "Step 1 / Open Settings / Click the icon..." sample copy instead of your text) — a full 3-image article rendered wrong silently until the PNGs were actually viewed. Always nest under props when hand-building job.json (snap_job read of a working job confirms the shape); re-render and snap_view immediately after the first write to catch this class of silent-default bug before iterating on placement.
+
+- **2026-09-01** — 2026-09-01 — Nested cross-origin iframe (Shopify admin > embedded app, capture 2560x1249): a snap_frame_find `rect` copied straight into snap_add's manual x/y is WRONG for a NESTED iframe (boxes landed hundreds of px off) — always use `at:{selector,tabId,frameId}` there instead. For a TOP-LEVEL (non-nested) page, e.g. the plain storefront product page, frame rect DOES equal canvas coords 1:1 — the transform only exists once you're inside a nested iframe.
+
+- **2026-09-01** — 2026-09-01 — `label` component's x/y acts as a RIGHT-edge anchor (text extends LEFTWARD from x), not left-edge/center. A small x for a long label ran it off canvas-left entirely (hard rule #0). Rule: for `label`, set x ≈ desired right edge, budget ~9-10px/char leftward for the string, and keep x large enough that x-minus-textwidth stays ≥0 (and clear of any sidebar).
+
+- **2026-09-01** — 2026-09-01 — `zoom`'s props.x/y is BOTH the source-sample center AND the display position (true in-place magnifier), not two independent things. Overriding x/y to "relocate" the bubble away from its `at`-anchored element instead re-samples FROM the new (often empty) spot, producing a blank white zoom bubble. There's a `connector` prop for true relocation (schema unexplored). Safe default: leave zoom in-place; if that would cover important adjacent text, drop the zoom for that image rather than pass a naive x/y override.
+
+- **2026-09-01** — 2026-09-01 — In one session, every hand-typed x/y/w/h (no `at`) rendered at a uniform ~0.78× the typed value with ~zero offset, confirmed via two far-apart calibration round-trips (snap_add → export → snap_view grid). Not uiScale (that only scales chrome, not position) and too big for canvas-padding — likely stale shared-editor state from a prior session's image size. Fix: before placing real annotations, calibrate empirically (place a test element, render, measure with grid, derive factor k), then type every coordinate as desired_pixel / k. The overflow WARNING checks raw typed values against frame size and will false-positive on a correctly-compensated element — trust snap_view, not the warning text, in this state. Also: current label/highlight render sizes for a given string are much larger than older reference images in this repo (~450px for a 30-char label on a 2560-wide capture) — when translating/recreating annotations on an existing article, budget much more open space per label than the original layout used.
+
+- **2026-09-02** — 2026-09-02 — User feedback "components too big, don't let them overlap, prefer empty space" on an article using `label` pills for step callouts: `label` has no fontSize prop, so the only lever to shrink its rendered pill is shortening the text itself (e.g. "Step 2: Open the Quantity Break offer" → "Step 2: Open the offer" visibly shrank the pill). Also reduced `highlight` borderWidth 2.5→1.75 and `arrow` scale 1.5→1 for a lighter look. Separately found a real overlap bug: a label placed at real-pixel center (407,195) on a 2560-wide storefront capture overlapped the product photo (which started at x=565) — the fix was checking the actual photo/content bounding box before centering a callout in what looks like "empty" space to the left of it, not just checking it doesn't hit the sidebar/table like an admin screenshot. When shortening an existing label's text, double-check any arrow that pointed at a fixed absolute coordinate near the old pill's edge — it must be re-derived from the new (smaller) pill's actual edge, not reused, or it starts mid-air short of the pill or overshoots into the wrong target.
+
+- **2026-09-02** — 2026-09-02 — dich-ngon-ngu-app-volume-discount steps 2-3: arrow tails hand-typed at what looked like "just past the label pill's right edge" (e.g. x1=607 for a label centered at x=492) actually landed WELL INSIDE the pill and rendered as a line drawn straight through the label's own text ("...choose a langu[arrow]age", "...default con[arrow]tent"). Cause: `label`'s pill auto-sizes to its text at 2x uiScale (2560-wide capture), so a 26-33 char string is ~500-700px wide even though it "looks" narrower when eyeballing the source screenshot mentally. Rule: never anchor an arrow tail near a `label`/`step`/`textbox` using a guessed offset from its center x/y — auto-sized components can be 2-3x wider than intuition suggests at 2x uiScale. Either (a) shorten the label text (cheapest, also shrinks the pill per the 2026-09-02 principle already in this file), or (b) give the tail a large, deliberately generous clearance (100px+) past the estimated edge, then render+snap_view and pull it back in if the gap looks too big — pulling back in is a safe correction, starting inside the pill is not.
+
+- **2026-09-02** — 2026-09-02 — dich-ngon-ngu-app-volume-discount step 3: tried to fix a known "zoom at 1.1x looks broken/glitchy" case by bumping `zoom` from 1.1 to 1.8 while keeping the same w/h (280x76), expecting only a tighter, more-magnified in-place crop. Result was worse, not better: the rendered zoom bubble showed a garbled fragment (a stray letter and a couple of stray lines) instead of the intended "Item text" field — reverted to 1.1 and it rendered correctly again. Rule: changing a `zoom` component's `zoom` factor is not a safe math-only edit even with x/y/w/h untouched — it changes exactly which source pixels get sampled, and a bad combination can visibly corrupt the crop. Never change a zoom's magnification without immediately re-rendering and snap_view-ing the result before moving on; if it looks worse, revert rather than trying to "fix the fix" by further guessing, especially when the magnification wasn't what was actually asked for.
+
+- **2026-09-02** — "component mũi tên khi gắn vào ảnh trong KB lúc thì dài quá, lúc thì ngắn quá". Nguyên nhân không phải người đặt cẩu thả mà là hai hằng số **không biết đến nhau**: `geometryFor` đặt `label`/`step` cách mép target `46k` tính tới **TÂM** pill, còn `arrowGeometry` luôn kéo đuôi ra `150k` — nên trên ảnh 2560, một label 23 ký tự (rộng 387px) trùm qua cả target lẫn toàn bộ thân mũi tên, còn mũi tên thì lúc xuyên qua chữ của label, lúc hụt lại giữa không trung. `label` lại **vô hình** với mọi kiểm tra hình học vì nó không có `w/h` trong props (`elBox` trả 0×0), nên không có cảnh báo nào. Sửa: (a) `elSize()` tính đúng pill của label từ chính CSS của `label.js` — font mono nên mỗi ký tự đúng `0.6em`, đối chiếu với renderer thật ở k = 1/1.5/2/2.5 khớp tới từng pixel; (b) callout neo bằng `at` giờ đo từ **mép gần** của pill và chừa sẵn chỗ cho một mũi tên tối thiểu; (c) độ dài mũi tên suy ra từ callout nó xuất phát (`chooseCompanion`), hoặc từ chỗ trống thật của phía đó, không còn hằng số; (d) callout đặt sau cũng tự rơi vào đuôi mũi tên đã có, nên thứ tự đặt không còn quan trọng; (e) `checkGeometry` thêm 4 cảnh báo về mũi tên. Luật rút ra: **độ dài mũi tên là hệ quả của vị trí hai đầu — nếu đang gõ một con số độ dài thì đang làm sai** (xem PRINCIPLE #1b).

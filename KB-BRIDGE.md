@@ -908,3 +908,48 @@ Hai việc đã làm, và việc thứ hai mới là việc đáng kể:
 Đã soát lại mọi field khác các stub bịa ra (`read_image` → `{dataUrl}`, `comments_list` →
 `{comments}`, `session` → `{hasSession, turns}`, `job_save` → `{savedRel, rendered, warn}`,
 `list` → `{items}`) đối chiếu handler thật: chỉ `mdRel` sai.
+
+## 12. Job xong thì bàn giao bài, log ở lại với bài (2026-09-01)
+
+Job chạy xong đang hiện **hai chỗ**: mục ghim ngay dưới "+ New job" (màn hình run — canvas,
+preview, log) và chính bài viết trong danh sách bên dưới. Cùng một job, hai dòng trong rail, và
+cái người ta muốn mở là bài. Yêu cầu: *"sau khi job finished thì chỉ cần báo finished rồi hiện
+luôn ở Editor"*. Thay hành vi mô tả ở cuối mục 9 (mở bài bằng nút `Open article →`).
+
+**`finishAuthorRun()`** (bridge-kb.js) chạy khi dòng `Job finished` về:
+
+- Gỡ mục ghim, thu hồi luôn màn hình run (huỷ surface của preview + canvas agent — không còn
+  đường vào thì đừng để nó mount ngầm), toast "Job finished — opening …", rồi `selectArticle()`.
+- **Chỉ tự nhảy khi chưa mở bài nào.** Nếu người dùng đang đọc/sửa bài khác giữa lúc job chạy thì
+  chỉ báo toast; giật họ ra khỏi bài đang sửa để khoe bài mới là đổi một thứ đang làm dở lấy một
+  thứ chờ được.
+- **Run hỏng thì giữ nguyên màn hình.** `Job failed`/`Job crashed`/cancel, hoặc xong mà không đặt
+  tên bài nào: lúc đó canvas và log là câu trả lời **duy nhất** cho "nó đã làm gì", không có bài
+  nào để bàn giao. Reload trang cũng theo đúng luật này (`kb_query` trả `status === 'done'` +
+  `slug` thì không ghim lại).
+
+**Log không được chết theo màn hình.** Đó là hồ sơ của việc bài này được dựng ra sao, mà màn hình
+chứa nó thì vừa bị thu hồi. Hai lớp:
+
+- `jobLog` (RAM) — mọi dòng vào đây song song với việc vẽ ra DOM, vì **không panel nào là nhà lâu
+  dài của nó**: panel bài viết bị xoá mỗi lần mở bài khác, màn hình run thì bị thu hồi hẳn. Cả hai
+  vẽ lại từ `jobLog` (`paintLog`) chứ không dựa vào DOM còn sót lại. Có buffer rồi thì
+  `activeLog()` đổi câu hỏi: từ "job này sở hữu panel nào" sang **"người dùng có đang mở đúng bài
+  của job này không"** — không mở thì dòng mới chỉ vào `jobLog`, không vẽ đi đâu cả. Trước đó nó
+  vẽ thẳng vào panel bài viết bất kể panel đang mở bài nào, tức log của bài này nằm dưới tiêu đề
+  bài kia (job revise cũng dính, không riêng gì luồng mới).
+- `kb/<slug>/job-log.json` (đĩa) — [`snap-bridge/kb-log.js`](snap-bridge/kb-log.js), ghi lúc job
+  *settle* (done/failed/crashed/cancelled đều ghi — run kết thúc xấu mới đúng là run đáng đọc
+  lại), đọc qua lệnh mới `kb_log_read`. Không có nó thì "agent đã làm gì với bài này" chỉ trả lời
+  được cho tới khi job kế tiếp bắt đầu.
+
+**Vì sao là file riêng chứ không phải một key trong `job.json`** — đúng lý do `review.json` là
+file riêng (kb-review.js): `snap_job` ghi **cả object**, nên thứ gì runner nhét vào `job.json` sẽ
+bị agent lưu bước kế tiếp xoá sạch. File này chỉ runner ghi, chỉ KB Studio đọc, không ai render
+bài từ nó. Một bài một file, job sau đè job trước: panel này trả lời "agent vừa làm gì với bài
+này", không phải "mọi lần chạy từ trước tới nay" — lịch sử **chữ** của bài đã có
+`kb/<slug>/history/`.
+
+Mở một bài mà log đang chạy không thuộc về nó thì UI đọc bản trên đĩa (`paintSavedLog`), và chèn
+một dòng banner `— Build finished · <ngày giờ>` lên đầu: cùng panel, nhưng đây là hồ sơ của một
+run đã xong chứ không phải job đang chạy, mà panel thì không có manh mối nào khác để phân biệt.

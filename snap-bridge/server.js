@@ -18,11 +18,13 @@ import { z } from "zod";
 import { loadChromeBridgeConfig } from "./chrome-bridge-config.js";
 import { startJob, cancelJob, getCurrentJob, getReviseSession, resetReviseSession, noteJobSlug, currentReviewRound } from "./kb-job.js";
 import { writeReview, summarizeReview, REVIEW_OWNERS, REVIEW_SEVERITIES } from "./kb-review.js";
+import { readJobLog, jobLogPath } from "./kb-log.js";
 import { renderSteps, renderGridOverlay } from "./render.mjs";
 import { kitRegistry } from "./kit-introspect.js";
 import {
-  uiScaleFor, geometryFor, arrowBetween, isCentreAnchored as isCentreAnchoredIn,
-  elCentre as elCentreIn, checkGeometry as checkGeometryIn,
+  uiScaleFor, arrowBetween, arrowPlacement as arrowPlacementIn, CALLOUT_TYPES,
+  geometryFor as geometryForIn, isCentreAnchored as isCentreAnchoredIn,
+  elBox as elBoxIn, elCentre as elCentreIn, checkGeometry as checkGeometryIn,
 } from "./kit-geometry.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");
@@ -33,8 +35,11 @@ const PORT = Number(process.env.SNAP_BRIDGE_PORT || 8788);
 /* kit-geometry takes the repo root explicitly (so it stays testable without
    this server); every call from here is against this one. */
 const isCentreAnchored = (type) => isCentreAnchoredIn(REPO_ROOT, type);
+const elBox = (el, k) => elBoxIn(REPO_ROOT, el, k);
 const elCentre = (el) => elCentreIn(REPO_ROOT, el);
 const checkGeometry = (els, W, H) => checkGeometryIn(REPO_ROOT, els, W, H);
+const geometryFor = (type, r, at, k, frame, props) => geometryForIn(REPO_ROOT, type, r, at, k, frame, props);
+const arrowPlacement = (r, at, k, frame, props) => arrowPlacementIn(REPO_ROOT, r, at, k, frame, props);
 
 mkdirSync(OUT_ROOT, { recursive: true });
 
@@ -116,7 +121,8 @@ wss.on("connection", (ws, req) => {
       || msg.cmd === "kb_comments_list" || msg.cmd === "kb_comments_add"
       || msg.cmd === "kb_comments_resolve" || msg.cmd === "kb_comments_delete"
       || msg.cmd === "kb_session"
-      || msg.cmd === "kb_history_list" || msg.cmd === "kb_history_read" || msg.cmd === "kb_history_restore") handleKbCommand(ws, msg);
+      || msg.cmd === "kb_history_list" || msg.cmd === "kb_history_read" || msg.cmd === "kb_history_restore"
+      || msg.cmd === "kb_log_read") handleKbCommand(ws, msg);
   });
   ws.on("close", () => {
     if (wsClient === ws) wsClient = null;
@@ -225,6 +231,11 @@ function handleKbCommand(ws, msg) {
       saveKbJob(args.slug, args.job, args.rerenderSteps).then((d) => reply(true, d), (e) => reply(false, e));
     } else if (cmd === "kb_read_image") {
       reply(true, readKbImage(args.relPath));
+    } else if (cmd === "kb_log_read") {
+      // The log the last job on this article left behind (kb-log.js). Read on
+      // demand rather than folded into kb_read: it is wanted by exactly one
+      // panel, and kb_read's result is also what the agent-facing tools quote.
+      reply(true, { log: readJobLog(args.slug) });
     } else if (cmd === "kb_delete") {
       reply(true, deleteKbArticle(args.slug));
     } else if (cmd === "kb_comments_list") {
@@ -508,6 +519,8 @@ function deleteKbArticle(slug) {
     if (existsSync(commentsAbs)) unlinkSync(commentsAbs);
     const historyAbs = resolveOut(`${slug}.history`);
     if (existsSync(historyAbs)) rmSync(historyAbs, { recursive: true, force: true });
+    const logAbs = jobLogPath(slug);
+    if (existsSync(logAbs)) unlinkSync(logAbs);
     return { deleted: slug };
   }
   const jobAbs = resolveOut(path.join(slug, "job.json"));
@@ -854,6 +867,51 @@ function assembleMarkdown(job, mdAbs) {
  *                      from somewhere else, so a single selector cannot say
  *                      where it starts. Left to explicit x1/y1/x2/y2.
  */
+/** Where an anchored arrow's TAIL starts: the callouts already on the open
+ *  capture, as boxes in capture pixels.
+ *
+ *  This is the fix for arrows that come out the wrong length. An arrow in a KB
+ *  step is a connector — it runs from that step's own label / marker / note to
+ *  the control being described — so both of its ends are already on the canvas
+ *  and the distance between them is a measurement, not a choice. Left as a
+ *  choice it was wrong in both directions from the same constant: a tail typed
+ *  past its label drew the shaft through the label's own text, and a tail typed
+ *  short of it left the arrow hanging in mid-air.
+ *
+ *  `fromId` names the callout explicitly — snap_add returns an id for every
+ *  annotation it adds. Without one, kit-geometry adopts the nearest callout in
+ *  the arrow's own corridor; with no callout at all the length falls back to
+ *  whatever fits the room on that side.
+ *
+ *  Never blocks the placement: an editor that cannot answer get_els only means
+ *  there is nothing to anchor to. */
+async function canvasAnchors(at, k) {
+  let els = [];
+  try { els = (await callExtension("get_els", {}, 10000)).els || []; }
+  catch { return { from: null, callouts: [], arrows: [] }; }
+  const callouts = [], arrows = [];
+  for (const el of els) {
+    if (!el) continue;
+    if (el.type === "arrow") {
+      if ([el.x1, el.y1, el.x2, el.y2].every((n) => typeof n === "number")) {
+        arrows.push({ id: el.id, tail: { x: el.x1, y: el.y1 }, tip: { x: el.x2, y: el.y2 } });
+      }
+      continue;
+    }
+    if (!CALLOUT_TYPES.has(el.type)) continue;
+    const box = elBox({ type: el.type, props: el }, k);
+    if (!box || !box.w || !box.h) continue;
+    const words = String(el.text || el.title || "").slice(0, 40);
+    callouts.push({ ...box, id: el.id, label: `the ${el.type}${words ? ` "${words}"` : ""} (id: ${el.id})` });
+  }
+  if (!at.fromId) return { from: null, callouts, arrows };
+  const named = callouts.find((b) => b.id === at.fromId);
+  if (!named) {
+    throw new Error(`at.fromId "${at.fromId}" is not a step, label or textbox on the open capture. snap_add returns the id of every annotation it adds — pass one of those, or leave fromId out and the tail starts at the nearest callout behind it.`);
+  }
+  return { from: named, callouts, arrows };
+}
+
 /** Built fresh per HTTP request (see the request handler below) — stateless
  *  Streamable HTTP binds one transport to one server via connect(), and
  *  rebuilding both per request sidesteps any question of whether reusing a
@@ -952,7 +1010,7 @@ function buildMcpServer() {
   });
 
   mcp.registerTool("snap_add", {
-    description: `Add an annotation to the capture currently open in the editor. type is one of: ${ADD_TYPES.join(", ")}, or "custom:<id>" for a Lab-authored component. Prefer "at" over hand-guessed x/y: it reads the real on-screen box of a CSS selector and places the annotation exactly on it, which is the difference between an annotation that frames the control and one that lands next to it. props overrides anything "at" computes — call snap_kit first to see what each component supports.`,
+    description: `Add an annotation to the capture currently open in the editor. type is one of: ${ADD_TYPES.join(", ")}, or "custom:<id>" for a Lab-authored component. Prefer "at" over hand-guessed x/y: it reads the real on-screen box of a CSS selector and places the annotation exactly on it, which is the difference between an annotation that frames the control and one that lands next to it. For an arrow it also DERIVES the length instead of taking one: the head stops just short of the target and the tail starts on the callout the arrow leaves (whichever step/label/textbox is already on the capture behind it, or the one named by at.fromId), so add the callout first and the arrow second. props overrides anything "at" computes — call snap_kit first to see what each component supports.`,
     inputSchema: {
       type: z.string().describe(`One of: ${ADD_TYPES.join(", ")}, or "custom:<id>"`),
       at: z.object({
@@ -963,9 +1021,10 @@ function buildMcpServer() {
         pad: z.number().optional().describe("Pixels to grow a highlight/blur/spotlight box beyond the element. Defaults to 6 scaled to the capture's size."),
         side: z.enum(["left", "right", "top", "bottom"]).optional().describe("Which side of the element to put a step/label/textbox on, or which side an arrow comes in from. Default \"left\" — the empty gutter in an app screenshot is usually on the left. Never overlaps the element on any setting."),
         toSelector: z.string().optional().describe("arrow only: draw from the element in `selector` to this one instead of from empty space. Both endpoints stop just outside their element."),
-        gap: z.number().optional().describe("arrow only: how far short of the target edge the head stops. Default 14 scaled to the capture."),
-        length: z.number().optional().describe("arrow only, ignored with toSelector: how long the arrow is. Default 150 scaled to the capture."),
-      }).optional().describe("Bind this annotation to a real element instead of guessing coordinates — including arrows, which take `side` (and optionally `toSelector`). The page must still be scrolled the same way it was when snap_capture_tab ran: this reads live positions, not the ones frozen in the image."),
+        fromId: z.string().optional().describe("arrow only: the id of an annotation already on this capture (snap_add returns one for every element it adds) that this arrow starts at — normally the step/label/textbox the arrow leads away from. Its real box is measured, so the tail lands just outside the pill instead of inside its text, and the length becomes the gap between the two. Omit it and the nearest callout in the arrow's own corridor is used automatically; pass it when several callouts sit on the same side."),
+        gap: z.number().optional().describe("arrow only: how far short of the target edge the head stops — also the clearance the tail leaves at the callout end. Default 14 scaled to the capture."),
+        length: z.number().optional().describe("arrow only, ignored with toSelector: forces the shaft length instead of deriving it. Only reach for this when there is no callout to start at and the fitted length is wrong — a typed length is what makes arrows come out too long on one shot and too short on the next."),
+      }).optional().describe("Bind this annotation to a real element instead of guessing coordinates — including arrows, which take `side` (and optionally `fromId` / `toSelector`). The page must still be scrolled the same way it was when snap_capture_tab ran: this reads live positions, not the ones frozen in the image."),
       props: z.record(z.string(), z.any()).optional().describe("Field overrides merged onto the new element, e.g. {\"x\":120,\"y\":80,\"text\":\"Click here\"}. Wins over anything \"at\" computed."),
     },
   }, async ({ type, at, props }) => {
@@ -986,13 +1045,28 @@ function buildMcpServer() {
         return r;
       };
       const r = await rectFor(at.selector);
+      const frame = { w: lastOpened.width, h: lastOpened.height };
+      const where = `at "${at.selector}" → ${r.w}x${r.h} @ ${r.x},${r.y}`;
       if (type === "arrow" && at.toSelector) {
         const to = await rectFor(at.toSelector);
         computed = arrowBetween(r, to, k);
         note = ` [at "${at.selector}" → "${at.toSelector}"]`;
       } else {
-        computed = geometryFor(type, r, at, k, { w: lastOpened.width, h: lastOpened.height });
-        note = ` [at "${at.selector}" → ${r.w}x${r.h} @ ${r.x},${r.y}]`;
+        // What is already on this capture, so the two halves of a callout+arrow
+        // pair find each other whichever order they are added in: the arrow's
+        // tail lands on the callout, or the callout lands at the arrow's tail.
+        // Neither end is then a number anyone had to type.
+        const canvas = await canvasAnchors(at, k);
+        if (type === "arrow") {
+          const plan = arrowPlacement(r, { ...at, from: canvas.from, candidates: canvas.callouts }, k, frame, props);
+          computed = { x1: plan.x1, y1: plan.y1, x2: plan.x2, y2: plan.y2 };
+          note = ` [${where}; comes in from the ${plan.side}, `
+            + (plan.from ? `tail on ${plan.from.label}` : "nothing behind it — length fitted to the room on that side")
+            + "]";
+        } else {
+          computed = geometryFor(type, r, { ...at, arrows: canvas.arrows }, k, frame, props);
+          note = ` [${where}]`;
+        }
       }
     }
     const merged = { ...computed, ...(props || {}) };
@@ -1137,7 +1211,23 @@ function buildMcpServer() {
     const abs = resolveOut(path.join(slug, "job.json"));
     if (!job) {
       if (!existsSync(abs)) {
-        throw new Error(`no job.json for "${slug}" (${toKbRel(abs)} does not exist). Flat single-file articles — kb/<slug>.md — have no job file; those are edited with snap_write_kb.`);
+        // "There is no job.json" answers two completely different situations,
+        // and telling both of them the same thing cost a real article every
+        // annotation it had. A capture agent six screenshots into a BRAND NEW
+        // article read "flat single-file articles are edited with snap_write_kb"
+        // as a verdict on the article it was in the middle of building, took the
+        // off-ramp, and never wrote a job file at all — so KB Studio had nothing
+        // to draw live from, every step image stayed a dead PNG, and the els
+        // that placed those callouts now exist nowhere but baked into the
+        // exported pixels. (The same message, the same day, was ignored by
+        // another job that wrote job.json anyway: it is a coin flip, not a
+        // one-off.) So the flat-article advice is given ONLY to an article that
+        // is already flat on disk; a slug with nothing written for it yet is
+        // told the truth — it is early, not decided.
+        if (existsSync(resolveOut(`${slug}.md`))) {
+          throw new Error(`no job.json for "${slug}" (${toKbRel(abs)} does not exist), but kb/${slug}.md does — this article is already a flat single-file one, and those are edited with snap_write_kb.`);
+        }
+        throw new Error(`nothing has been written for "${slug}" yet — neither ${toKbRel(abs)} nor kb/${slug}.md exists. This says nothing about what shape the article should be, only that it is early. If you are BUILDING it (you have captures on disk and annotations on them), call snap_job again with the complete job object to create the file — one step is enough, and write it again after each captured step. Only reach for snap_write_kb instead if this article is deliberately a single flat kb/${slug}.md with no per-step annotations, which also means its images can never be edited by hand in KB Studio.`);
       }
       return text(readFileSync(abs, "utf8"));
     }

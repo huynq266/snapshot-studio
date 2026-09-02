@@ -92,6 +92,10 @@ khung**, phải `snap_frame_scroll` tới trước. (Playbook #2 — đây là l
     rất dễ hỏng khi đi qua JSON).
   - `arrow` **neo được bằng `at`**: `at.side` cho mũi tên đi từ vùng trống vào element, hoặc
     `at.toSelector` để nối hai element. Đầu mũi tên luôn dừng **trước** mép target, không đè lên.
+  - **Độ dài mũi tên: đừng gõ.** Đặt callout (`label`/`step`/`textbox`) và `arrow` trên **cùng
+    một `at.selector`** — đuôi mũi tên tự bám vào callout đó (hoặc callout tự rơi vào đuôi mũi
+    tên nếu đặt arrow trước), nên mọi mũi tên trong bài dài bằng nhau. Nhiều callout cùng phía
+    thì chỉ đích danh bằng `at.fromId`. Playbook #1b — đây là lỗi "lúc dài quá, lúc ngắn quá".
   - `at` đọc vị trí **sống**, nên trang phải đang cuộn y như lúc `snap_capture_tab` chạy.
   - `at` cũng tự nhân `uiScale` của ảnh và tự chọn phía **còn chỗ trống** khi không truyền `side`.
 - Chỉ đoán `x/y` khi không có element nào để neo (ví dụ callout đặt ở vùng trắng). Khi đó:

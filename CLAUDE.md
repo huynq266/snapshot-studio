@@ -48,3 +48,16 @@ literal matches a token *exactly* — a number that matches no scale step is a l
 one-off layout value and is deliberately left alone (see the exception above). It only runs
 on CSS typed into the Lab tab, not on `editor.css` or the vendored part of `tokens.css` —
 those still rely on this rule being followed by hand.
+
+## Never create a git worktree
+
+Work in place, on whatever branch the session already has checked out. Don't call
+`EnterWorktree`, don't run `git worktree add`, and don't run `orca worktree create` —
+and don't launch a subagent with `isolation: "worktree"` either. The one exception is
+an explicit request: the user types the word "worktree".
+
+**Why**: every worktree Claude Code makes lands in `.claude/worktrees/<name>` on a
+`worktree-*` branch cut from `origin/main`, and Orca shows those in its sidebar as
+separate workspaces (it classifies them `agent-scratch`, "created by an agent"). One
+per request turns the workspace list into noise, and each one is a branch someone has
+to remember to merge or delete later. Isolation the user didn't ask for isn't free.
