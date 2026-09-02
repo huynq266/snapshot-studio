@@ -203,6 +203,16 @@ function handleKbCommand(ws, msg) {
         markdown: args.markdown,
         mdFilename: args.mdFilename,
         sessionTabs: args.sessionTabs,
+        // How a job reaches the tabs the user put in its session. kb-job.js
+        // cannot call the extension itself (this file imports it, not the other
+        // way round), so the two calls are handed down. adopt() moves those tabs
+        // into the tab group Chrome Bridge gave the job, which is the whole reason
+        // the job can work on the user's real tab instead of re-opening its URL;
+        // release() puts them back. See bridge-worker.js's cmdAdoptTabs.
+        tabs: {
+          adopt: (jobTabId, tabIds) => callExtension("adopt_tabs", { jobTabId, tabIds }),
+          release: (tabIds) => callExtension("release_tabs", { tabIds }),
+        },
         snapSelf: { url: `http://127.0.0.1:${PORT}/mcp`, token: TOKEN },
         onProgress: pushKbProgress,
       });

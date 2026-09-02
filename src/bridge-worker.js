@@ -210,6 +210,132 @@ async function removeKbSessionTab(tabId) {
   return listKbSessionTabs();
 }
 
+
+/* -------------------------------------------------------------------
+ * Adopting the KB session's tabs into a job's Chrome Bridge tab group.
+ *
+ * A job's mcp__chrome__* tools are hard-scoped by Chrome Bridge to "this
+ * session's own tab group", which it creates fresh per session. The
+ * 2026-08-28 entry in KB-BRIDGE.md concluded from that the user's real
+ * tab could never be reached, and switched the job to re-opening the URL
+ * in a tab of its own. That conclusion was about TIMING, not a missing
+ * API: chrome.tabs.group() moves an already-open tab into an existing
+ * group perfectly well — it just needs the group to exist, and when the
+ * user presses Start it does not yet (Chrome drops an empty group, so
+ * "Claude · 0041" is only a label until the session opens its first tab).
+ *
+ * So adoption runs one step later. The job navigates once, which is what
+ * makes Chrome Bridge materialise the group; snap-bridge then calls
+ * adopt_tabs with that tab's id, we read the group off it, and move the
+ * session's tabs in. Chrome Bridge accepts them from then on like tabs it
+ * opened itself, and the job works on the user's REAL tab — keeping the
+ * scroll position, the open panel and the half-filled form that
+ * re-opening the URL threw away and had to ask the instruction to
+ * describe instead.
+ *
+ * Why the previous group is recorded rather than just ungrouping later —
+ * the tab is the user's, twice over:
+ *  - it visibly moves in the tab strip, so it has to move BACK when the
+ *    job ends, into the group it came from if it had one;
+ *  - Chrome Bridge tears its own group down, and a tab still in it can go
+ *    with it. Closing someone's logged-in tab is a far worse failure than
+ *    anything this feature buys.
+ * The map is persisted for the same reason kbSessionTabIds is: an MV3
+ * service worker is killed at will, and a forgotten entry here is a tab
+ * stranded in a dead group.
+ * ------------------------------------------------------------------- */
+
+// chrome.tabGroups.TAB_GROUP_ID_NONE, spelled out so this file needs no
+// "tabGroups" permission: chrome.tabs.group()/ungroup() and Tab.groupId are
+// all on the "tabs" API the manifest already asks for. Only the tabGroups
+// NAMESPACE (group titles, colours) would need more.
+const TAB_GROUP_ID_NONE = -1;
+
+/** tabId -> { groupId, windowId, index } as the tab was BEFORE adoption. */
+let adoptedTabs = new Map();
+
+chrome.storage.local.get('kbAdoptedTabs').then((r) => {
+  if (r.kbAdoptedTabs && typeof r.kbAdoptedTabs === 'object') {
+    adoptedTabs = new Map(Object.entries(r.kbAdoptedTabs).map(([k, v]) => [Number(k), v]));
+  }
+});
+function saveAdopted() {
+  chrome.storage.local.set({ kbAdoptedTabs: Object.fromEntries(adoptedTabs) });
+}
+chrome.tabs.onRemoved.addListener((tabId) => {
+  if (adoptedTabs.delete(tabId)) saveAdopted();
+});
+
+async function cmdAdoptTabs(args) {
+  const jobTabId = args && args.jobTabId;
+  if (typeof jobTabId !== 'number') throw new Error('jobTabId is required — the tab Chrome Bridge opened for this job.');
+  const jobTab = await chrome.tabs.get(jobTabId);
+  const groupId = jobTab.groupId;
+  if (groupId == null || groupId === TAB_GROUP_ID_NONE) {
+    throw new Error(`tab ${jobTabId} is not in a tab group, so there is nothing to adopt into — Chrome Bridge only materialises its group once it has opened a tab.`);
+  }
+  // A previous job that ended without releasing (worker killed mid-run, bridge
+  // dropped) would otherwise leave its tabs in a group nobody owns any more.
+  if (adoptedTabs.size) await cmdReleaseTabs({});
+  await pruneKbSession();
+  const requested = Array.isArray(args.tabIds) && args.tabIds.length ? args.tabIds : Array.from(kbSessionTabIds);
+  const adopted = [];
+  const skipped = [];
+  for (const id of requested) {
+    if (id === jobTabId) continue;
+    // Intersected with this extension's OWN session list rather than trusting
+    // the ids the bridge sent. They are the same ids in practice (bridge-kb.js
+    // snapshotted them from here), but this keeps "which tabs may be moved"
+    // answerable from the list the user actually clicked.
+    if (!kbSessionTabIds.has(id)) { skipped.push({ id, reason: 'not in the KB session tab list' }); continue; }
+    let tab;
+    try { tab = await chrome.tabs.get(id); } catch (e) { skipped.push({ id, reason: 'tab is gone' }); continue; }
+    if (tab.groupId === groupId) { adopted.push({ id, title: tab.title || tab.url, url: tab.url }); continue; }
+    // chrome.tabs.group() refuses a pinned tab, and unpinning one behind the
+    // user's back is not this feature's call to make.
+    if (tab.pinned) { skipped.push({ id, reason: 'tab is pinned — unpin it to use it in a job' }); continue; }
+    try {
+      if (!adoptedTabs.has(id)) adoptedTabs.set(id, { groupId: tab.groupId, windowId: tab.windowId, index: tab.index });
+      await chrome.tabs.group({ tabIds: id, groupId });
+      adopted.push({ id, title: tab.title || tab.url, url: tab.url });
+    } catch (e) {
+      adoptedTabs.delete(id);
+      skipped.push({ id, reason: String((e && e.message) || e) });
+    }
+  }
+  saveAdopted();
+  return { groupId, adopted, skipped };
+}
+
+async function cmdReleaseTabs(args) {
+  const ids = Array.isArray(args && args.tabIds) && args.tabIds.length ? args.tabIds : Array.from(adoptedTabs.keys());
+  const released = [];
+  const failed = [];
+  for (const id of ids) {
+    const before = adoptedTabs.get(id);
+    if (!before) continue;
+    try { await chrome.tabs.get(id); } catch (e) { adoptedTabs.delete(id); continue; }
+    try {
+      if (before.groupId != null && before.groupId !== TAB_GROUP_ID_NONE) {
+        // Its old group can be gone by now (the user closed the last tab in
+        // it). Out of our group is still the right answer if so.
+        try { await chrome.tabs.group({ tabIds: id, groupId: before.groupId }); }
+        catch (e) { await chrome.tabs.ungroup(id); }
+      } else {
+        await chrome.tabs.ungroup(id);
+      }
+      released.push(id);
+      adoptedTabs.delete(id);
+    } catch (e) {
+      // Entry stays: the next release — or the next job's adopt, which clears
+      // stale ones first — gets another go at putting it back.
+      failed.push({ id, reason: String((e && e.message) || e) });
+    }
+  }
+  saveAdopted();
+  return { released, failed };
+}
+
 chrome.runtime.onMessage.addListener((msg) => {
   if (!msg || msg.type !== 'kb-session-cmd') return;
   const { reqId, cmd, args } = msg;
@@ -244,6 +370,8 @@ async function handleBridgeCommand(msg) {
     if (cmd === 'frame_find') { replyBridge(reqId, true, await cmdFrameFind(args || {})); return; }
     if (cmd === 'frame_click') { replyBridge(reqId, true, await cmdFrameClick(args || {})); return; }
     if (cmd === 'frame_rect') { replyBridge(reqId, true, await cmdFrameRect(args || {})); return; }
+    if (cmd === 'adopt_tabs') { replyBridge(reqId, true, await cmdAdoptTabs(args || {})); return; }
+    if (cmd === 'release_tabs') { replyBridge(reqId, true, await cmdReleaseTabs(args || {})); return; }
     replyBridge(reqId, false, new Error(`unknown command "${cmd}"`));
   } catch (e) {
     replyBridge(reqId, false, e);
