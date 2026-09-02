@@ -403,15 +403,27 @@ function chooseCompanion(r, side, candidates) {
         : side === "top" ? c.y + c.h <= r.y
           : c.y >= r.y + r.h;
     if (!beyond) continue;
-    const inCorridor = horiz
-      ? cy >= c.y - c.h / 2 && cy <= c.y + c.h * 1.5
-      : cx >= c.x - c.w / 2 && cx <= c.x + c.w * 1.5;
+    // In the corridor the shaft will be drawn in: either across from the
+    // target's own centre line (within a callout's height of it), or simply
+    // level with SOME part of the target — a short pill beside a 300px-tall
+    // panel belongs to that panel wherever along it it sits, and requiring it
+    // to line up with the panel's middle left exactly that pair unconnected.
+    const lo = horiz ? c.y : c.x, hi = horiz ? c.y + c.h : c.x + c.w;
+    const span = horiz ? c.h : c.w;
+    const centre = horiz ? cy : cx;
+    const rLo = horiz ? r.y : r.x, rHi = horiz ? r.y + r.h : r.x + r.w;
+    const inCorridor = (centre >= lo - span && centre <= hi + span) || (lo < rHi && hi > rLo);
     if (!inCorridor) continue;
     const d = side === "left" ? r.x - (c.x + c.w)
       : side === "right" ? c.x - (r.x + r.w)
         : side === "top" ? r.y - (c.y + c.h)
           : c.y - (r.y + r.h);
-    if (!best || d < best.d) best = { ...c, d };
+    // Nearest to where the arrow would ideally run: along the shaft AND across
+    // it. With two callouts stacked beside one tall region, the one level with
+    // the target wins over the one merely closer to its edge.
+    const perp = Math.abs((lo + hi) / 2 - centre);
+    const score = d + perp;
+    if (!best || score < best.score) best = { ...c, d, score };
   }
   return best;
 }
@@ -424,7 +436,7 @@ function pickArrowSide(r, candidates, frame, need) {
   let best = null;
   for (const side of SIDES) {
     const c = chooseCompanion(r, side, candidates);
-    if (c && (!best || c.d < best.d)) best = { side, d: c.d };
+    if (c && (!best || c.score < best.score)) best = { side, score: c.score };
   }
   return best ? best.side : pickSide(r, need, frame);
 }
@@ -496,7 +508,7 @@ function fitsFrame(box, frame) {
  *  coming in from empty space, which is the one thing an arrow must never do.
  *  Returns null when sliding would push the box onto the tail itself, so the
  *  caller can fall through to the ordinary placement. */
-function slideOntoFrame(box, frame, tail, clear) {
+function slideOntoFrame(box, frame, tail, clear, target) {
   if (!frame || !frame.w) return null;
   const b = { ...box };
   b.x = Math.min(Math.max(0, b.x), Math.max(0, frame.w - b.w));
@@ -504,7 +516,10 @@ function slideOntoFrame(box, frame, tail, clear) {
   const half = clear / 2;
   const clearsTail = tail.x <= b.x - half || tail.x >= b.x + b.w + half
     || tail.y <= b.y - half || tail.y >= b.y + b.h + half;
-  return clearsTail ? b : null;
+  // Sliding must never buy frame-fit at the cost of PLACEMENT_PLAYBOOK #1: a
+  // callout on top of the thing it explains is the worse of the two failures.
+  const clearsTarget = !target || !overlapArea(b, target);
+  return clearsTail && clearsTarget ? b : null;
 }
 
 /** An arrow already pointing at this target, if there is one — the same pairing
@@ -548,6 +563,15 @@ export function arrowPlan(repoRoot, r, at, k, frame, props) {
   const from = at.from && typeof at.from.x === "number" && at.from.w ? at.from : null;
   const cx = Math.round(r.x + r.w / 2), cy = Math.round(r.y + r.h / 2);
 
+  // The kit's own rule for which path shape an anchored arrow gets
+  // (kit-catalog.js "arrow" use_when, restated in arrow.js's Properties note):
+  // axis-aligned ends read right as a straight run — a degenerate elbow — while
+  // ends that genuinely do not line up want the curve. The one shape that is
+  // never right is a straight diagonal, and that is exactly what this function
+  // would emit when it aims the tail at an off-centre callout. So when it does
+  // that, it says so, and snap_add carries the shape onto the element.
+  let shape = null;
+
   if (side === "left" || side === "right") {
     const toRight = side === "right";
     const x2 = toRight ? Math.round(r.x + r.w + gap) : Math.round(r.x - gap);
@@ -560,15 +584,14 @@ export function arrowPlan(repoRoot, r, at, k, frame, props) {
         reach = d;
         // Aim at the callout's middle — but only when it is genuinely off the
         // target's centre line. A barely-slanted arrow between two things that
-        // do line up reads as careless (PLACEMENT_PLAYBOOK: elbow when they
-        // align, curve when they genuinely do not).
+        // do line up reads as careless.
         const fy = Math.round(from.y + from.h / 2);
-        y1 = Math.abs(fy - cy) <= head ? cy : fy;
+        if (Math.abs(fy - cy) > head) { y1 = fy; shape = "curved"; }
       }
     }
     const room = frame && frame.w ? (toRight ? frame.w - margin - x2 : x2 - margin) : null;
     const len = at.length != null ? Math.round(at.length) : fitLength(reach, room, want, min);
-    return { x1: toRight ? x2 + len : x2 - len, y1, x2, y2: cy, side, from: reach != null ? from : null };
+    return { x1: toRight ? x2 + len : x2 - len, y1, x2, y2: cy, side, shape, from: reach != null ? from : null };
   }
 
   const down = side === "bottom";
@@ -580,12 +603,12 @@ export function arrowPlan(repoRoot, r, at, k, frame, props) {
     if (d > 0) {
       reach = d;
       const fx = Math.round(from.x + from.w / 2);
-      x1 = Math.abs(fx - cx) <= head ? cx : fx;
+      if (Math.abs(fx - cx) > head) { x1 = fx; shape = "curved"; }
     }
   }
   const room = frame && frame.h ? (down ? frame.h - margin - y2 : y2 - margin) : null;
   const len = at.length != null ? Math.round(at.length) : fitLength(reach, room, want, min);
-  return { x1, y1: down ? y2 + len : y2 - len, x2: cx, y2, side, from: reach != null ? from : null };
+  return { x1, y1: down ? y2 + len : y2 - len, x2: cx, y2, side, shape, from: reach != null ? from : null };
 }
 
 /** arrowPlan plus the two decisions it does not make for itself: which side the
@@ -731,7 +754,7 @@ export function geometryFor(repoRoot, type, r, at, k, frame, props) {
               : { x: onArrow.tail.x, y: Math.round(onArrow.tail.y - clear - size.h / 2) };
         const box = { x: Math.round(at2.x - size.w / 2), y: Math.round(at2.y - size.h / 2), w: size.w, h: size.h };
         if (fitsFrame(box, frame)) return at2;
-        const slid = slideOntoFrame(box, frame, onArrow.tail, clear);
+        const slid = slideOntoFrame(box, frame, onArrow.tail, clear, r);
         if (slid) return { x: Math.round(slid.x + size.w / 2), y: Math.round(slid.y + size.h / 2) };
       }
       const gap = calloutGap(repoRoot, k);
@@ -761,7 +784,7 @@ export function geometryFor(repoRoot, type, r, at, k, frame, props) {
               : { x: Math.round(onArrow.tail.x - w / 2), y: Math.round(onArrow.tail.y - clear - 150 * k), w };
         const box = { x: at2.x, y: at2.y, w, h: Math.round(150 * k) };
         if (fitsFrame(box, frame)) return at2;
-        const slid = slideOntoFrame(box, frame, onArrow.tail, clear);
+        const slid = slideOntoFrame(box, frame, onArrow.tail, clear, r);
         if (slid) return { x: slid.x, y: slid.y, w };
       }
       const side = asked || pickSide(r, w + gap, frame, onArrow && onArrow.side);
@@ -771,8 +794,8 @@ export function geometryFor(repoRoot, type, r, at, k, frame, props) {
       return { x: Math.round(r.x + r.w) + gap, y: Math.round(r.y - 24 * k), w };
     }
     case "arrow": {
-      const { x1, y1, x2, y2 } = arrowPlacement(repoRoot, r, at, k, frame, props);
-      return { x1, y1, x2, y2 };
+      const { x1, y1, x2, y2, shape } = arrowPlacement(repoRoot, r, at, k, frame, props);
+      return shape ? { x1, y1, x2, y2, shape } : { x1, y1, x2, y2 };
     }
     default:
       return { x: Math.round(r.x + r.w / 2), y: Math.round(r.y + r.h / 2) };

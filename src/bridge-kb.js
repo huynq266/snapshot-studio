@@ -1120,16 +1120,27 @@
     });
     articleDeleteBtn.addEventListener('click', async () => {
       if (!selectedSlug) return;
+      // What goes is decided by whether the article HAS a job, not by which
+      // half readKbArticle happened to open it as: a flat "<slug>.md" with a
+      // job.json beside it reports kind "file" and still owns a directory full
+      // of captures, which the delete takes with it.
       if (!confirm(`Delete "${articleTitle.textContent}"? This removes the article` +
-        (articleKind === 'job' ? ', its images, comments, and history' : ' and its comments/history') +
+        (articleJob ? ', its images, comments, and history' : ' and its comments/history') +
         ' permanently — cannot be undone.')) return;
       articleDeleteBtn.disabled = true;
       try {
         await callBg('delete', { slug: selectedSlug });
-        resetArticleState();   // the article is gone — an unsaved-edits guard on the way out would be pointless
+        // Leave the article here, on the strength of having just deleted it —
+        // not by waiting for refreshJobBoard() to notice the slug missing from
+        // the listing. That indirection is only ever right when the listing
+        // agrees, and when it did not (see deleteKbArticle: a half-deleted
+        // article stayed listed) the panel sat there showing a file that no
+        // longer existed, Delete button and all, until the page was reloaded.
+        // The unsaved-edits guard is skipped on purpose — there is nothing left
+        // to save it into.
+        leaveArticle();
+        showBoardView('new');
         toast('Deleted.');
-        // refreshJobBoard() itself falls back to selectNewJob() once it sees
-        // selectedSlug missing from the list — no separate reset needed here.
         await refreshJobBoard();
       } catch (e) {
         toast('Could not delete: ' + e.message);
@@ -1289,6 +1300,30 @@
       const m = /^#\s+(.+)$/m.exec(md || '');
       return m ? m[1].trim() : '';
     }
+    /** A step's `notes` as its `> **Note:**` lines. Byte-for-byte the bridge's
+     *  own noteLines() (snap-bridge/kb-notes.js), duplicated rather than
+     *  imported because this file is a plain browser IIFE with nothing to
+     *  import from — the same reason jobToMarkdown() itself is a copy. Keep the
+     *  two in step; kb-notes.js carries the why, and the short version is that
+     *  `notes` is a plain STRING for the whole capture stage, which is exactly
+     *  the stretch this preview covers.
+     *
+     *  Iterating that string is what put a `> **Note:** undefined` line on
+     *  screen for every character in it. */
+    function noteLines(notes) {
+      if (!Array.isArray(notes)) return [];
+      const out = [];
+      for (const note of notes) {
+        const text = typeof note === 'string' ? note : note && note.text;
+        if (!text) continue;
+        const kind = (note && typeof note === 'object' && note.kind) || 'Note';
+        const [first, ...rest] = String(text).trim().split(/\r?\n/);
+        out.push(`> **${kind}:** ${first}`);
+        for (const line of rest) out.push(line.trim() ? `> ${line.trim()}` : '>');
+        out.push('');
+      }
+      return out;
+    }
     /** job.json rendered as the article it is going to be, for the stretch of a
      *  job where the steps exist and the markdown does not. Deliberately the
      *  same shape the bridge's own assembleMarkdown() emits (server.js), so the
@@ -1318,7 +1353,7 @@
         lines.push(`## ${n}. ${(s.heading || '').trim()}`.trim(), '');
         if (s.out) lines.push(`![${(s.heading || 'Step ' + n).replace(/[[\]]/g, '')}](${rel(s.out)})`, '');
         if (s.body) lines.push(String(s.body).trim(), '');
-        for (const note of s.notes || []) lines.push(`> **${note.kind || 'Note'}:** ${note.text}`, '');
+        lines.push(...noteLines(s.notes));
       });
       if (job.outro) lines.push(String(job.outro).trim(), '');
       return lines.join('\n');

@@ -49,6 +49,7 @@ import { fileURLToPath } from "node:url";
 import { loadChromeBridgeConfig } from "./chrome-bridge-config.js";
 import { readReview, findingsFor, summarizeReview } from "./kb-review.js";
 import { writeJobLog } from "./kb-log.js";
+import { promptText } from "./kb-playbook.js";
 
 // Same computation as server.js — not process.cwd(), which depends on how
 // this process happened to be launched and is not guaranteed to be the repo
@@ -108,8 +109,17 @@ function readSkillFiles() {
   for (const [label, file] of [["SKILL.md", "SKILL.md"], ["PLACEMENT_PLAYBOOK.md", "PLACEMENT_PLAYBOOK.md"]]) {
     try {
       // Strip YAML frontmatter — it addresses the skill loader, not the model.
-      const raw = readFileSync(path.join(SKILL_DIR, file), "utf8").replace(/^---\n[\s\S]*?\n---\n/, "");
-      parts.push(`--- BEGIN ${label} ---\n${raw.trim()}\n--- END ${label} ---`);
+      // The \r? in there is not decoration: on a Windows checkout with
+      // autocrlf these files come off disk with CRLF, and frontmatter that fails
+      // to strip is YAML fed to every stage as if it were instructions.
+      const raw = readFileSync(path.join(SKILL_DIR, file), "utf8").replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, "");
+      // A learning a later session proved WRONG keeps its text in the file for
+      // whoever reads back through the history, but it must not keep being
+      // taught: promptText collapses every retired bullet to a one-line stub.
+      // The correction itself lives in the ĐÍNH CHÍNH section above the log,
+      // is prose, and stays — that is the part worth the tokens.
+      const usable = file === "PLACEMENT_PLAYBOOK.md" ? promptText(raw) : raw;
+      parts.push(`--- BEGIN ${label} ---\n${usable.trim()}\n--- END ${label} ---`);
     } catch (e) {
       parts.push(`(${label} could not be read: ${e.message} — proceed on the instructions above alone.)`);
     }
@@ -139,11 +149,11 @@ function buildSystemPrompt(sessionTabs, origins) {
   return [
     `HOW YOU REACH THE USER'S PAGES — read this before doing anything else. The tabs the user added to this job are listed further down with their real tab ids, and you get to work in them directly. They are not reachable yet, though: Chrome Bridge only lets this session touch tabs in its own tab group, and that group does not exist until you open something.`,
     "",
-    `So your FIRST call is mcp__chrome__navigate WITHOUT a tabId. That opens this job's own tab, which brings the group into being, and the session's tabs are then moved into it for you automatically. After that, pass one of the session tab ids below to any tool that takes a tabId and you are driving the user's own tab — whatever they had scrolled to, opened or typed before starting this job is still on screen, which is usually the exact state the article needs to show.`,
+    `So your FIRST call is mcp__chrome__navigate WITHOUT a tabId. That opens a throwaway tab, which is what brings the group into being; the session's tabs are then moved in for you and that throwaway tab is closed again. From that point pass one of the session tab ids below to any tool that takes a tabId and you are driving the user's own tab — whatever they had scrolled to, opened or typed before starting this job is still on screen, which is usually the exact state the article needs to show.`,
     "",
     `If a call on a session tab is refused, or the log told you a tab could not be taken over, fall back to what this job used to do: navigate your own tab to that page's URL and work there. Same browser profile either way, so you are logged in — you just have to reach the right screen yourself.`,
     "",
-    `mcp__snap__snap_capture_tab / snap_frame_list / snap_frame_scroll / snap_frame_find / snap_frame_click (and snap_add's "at.tabId" when you use "at") always need an explicit tabId — they are Snap Studio's own tools and do not default the way mcp__chrome__* does. An mcp__chrome__* call with no tabId keeps using this job's own tab.`,
+    `ALWAYS name a tabId, on mcp__chrome__* calls too, not just the mcp__snap__* ones that require it. After that first navigate there is no tab of your own left to default to, so a call without a tabId lands on whichever of the user's tabs Chrome Bridge picks — and navigating THAT tab throws away the very state you were given it for. Name the tab you mean, every time.`,
     "",
     `mcp__chrome__new_tab is denied — always use navigate instead, even for the very first page.`,
     "",
@@ -157,7 +167,7 @@ function buildSystemPrompt(sessionTabs, origins) {
     "",
     readSkillFiles(),
     "",
-    `Reminder — allowed origin(s) for navigate: ${originList.join(", ")}. No new tabs: navigate once to open this job's own tab, then work in the session tab ids above, and name a tabId explicitly on every mcp__snap__* call.`,
+    `Reminder — allowed origin(s) for navigate: ${originList.join(", ")}. One tabId-less navigate to start, then a tabId on every single call after it.`,
   ].join("\n");
 }
 
@@ -380,7 +390,7 @@ function stagePreamble(name, body) {
     "",
     `You are the ${name.toUpperCase()} stage.`,
     "",
-    "The skill documents above describe the whole pipeline as ONE agent's work, because that is how a human runs it by hand from Claude Code. Everything they say about placement, verification and cleanup still binds you. Where they hand you work that belongs to another stage, this section wins — and the bridge denies the tools that are not yours, so a call that comes back refused is the boundary, not a misconfiguration to retry.",
+    "The skill's \"Quy trình\" walks the whole pipeline as ONE agent's work, because that is how a human runs it by hand from Claude Code; its \"Job author\" section describes this split and your stage specifically. Everything the skill says about placement, verification and cleanup still binds you. Where it hands you work that belongs to another stage, this section wins — and the bridge denies the tools that are not yours, so a call that comes back refused is the boundary, not a misconfiguration to retry.",
     "",
     body,
   ].join("\n");
@@ -536,6 +546,10 @@ async function runCaptureStage(job, ctx, push, findings, round) {
   // group, so last round's adoption does not carry over either — the next
   // navigate starts it again and the extension moves the tabs across.
   const adoptedTabIds = new Set();
+  // Set once the extension has closed the job's own tab, which it does as soon
+  // as it has somewhere better to work — see cmdAdoptTabs. After that jobTabId
+  // is only a record that navigating happened, not a tab anyone may name.
+  let jobTabClosed = false;
   let adoptPromise = null;
 
   /** Hand the session's tabs to this job, now that navigating has given Chrome
@@ -548,7 +562,8 @@ async function runCaptureStage(job, ctx, push, findings, round) {
     adoptPromise = ctx.tabs.adopt(id, sessionTabs.map((t) => t.id)).then(
       (r) => {
         for (const t of (r && r.adopted) || []) adoptedTabIds.add(t.id);
-        if (adoptedTabIds.size) push(`Working in the user's own tab(s) ${[...adoptedTabIds].join(", ")} — whatever they left on screen is still there.`);
+        if (r && r.jobTabClosed) jobTabClosed = true;
+        if (adoptedTabIds.size) push(`Working in the user's own tab(s) ${[...adoptedTabIds].join(", ")} — whatever they left on screen is still there${jobTabClosed ? ", and this job's own tab has been closed again" : ""}.`);
         for (const s of (r && r.skipped) || []) push(`Tab ${s.id} stays out of reach (${s.reason}) — its URL has to be navigated to instead.`);
         return r;
       },
@@ -618,8 +633,8 @@ async function runCaptureStage(job, ctx, push, findings, round) {
           push(`Denied — ${doing(toolName, input)}: this job has not opened its own browser tab yet.`);
           return { behavior: "deny", message: "Call mcp__chrome__navigate first — that opens this job's tab and is also what puts the session's tabs within reach. On a fix round your previous tab is gone, so navigate again." };
         }
-        if (tabId !== jobTabId && !adoptedTabIds.has(tabId)) {
-          const mine = [jobTabId, ...adoptedTabIds].join(", ");
+        if (!((tabId === jobTabId && !jobTabClosed) || adoptedTabIds.has(tabId))) {
+          const mine = [...(jobTabClosed ? [] : [jobTabId]), ...adoptedTabIds].join(", ");
           push(`Denied — ${doing(toolName, input)}: browser tab ${tabId} is not one of this job's.`);
           return { behavior: "deny", message: `tabId ${tabId} is not a tab this job may touch. The ones it may are: ${mine}.` };
         }

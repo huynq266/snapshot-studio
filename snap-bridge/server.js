@@ -19,6 +19,8 @@ import { loadChromeBridgeConfig } from "./chrome-bridge-config.js";
 import { startJob, cancelJob, getCurrentJob, getReviseSession, resetReviseSession, noteJobSlug, currentReviewRound } from "./kb-job.js";
 import { writeReview, summarizeReview, REVIEW_OWNERS, REVIEW_SEVERITIES } from "./kb-review.js";
 import { readJobLog, jobLogPath } from "./kb-log.js";
+import { playbookPath, appendLearning } from "./kb-playbook.js";
+import { noteLines } from "./kb-notes.js";
 import { renderSteps, renderGridOverlay } from "./render.mjs";
 import { kitRegistry } from "./kit-introspect.js";
 import {
@@ -523,22 +525,37 @@ async function saveKbJob(slug, job, rerenderSteps) {
 function deleteKbArticle(slug) {
   if (typeof slug !== "string" || !slug) throw new Error("slug is required");
   const flatAbs = resolveOut(`${slug}.md`);
-  if (existsSync(flatAbs)) {
+  const dirAbs = resolveOut(slug);
+  // The two halves are ONE article, and deleting has to take both. A flat
+  // "<slug>.md" with a "<slug>/job.json" beside it is exactly what
+  // readKbArticle() opens as a single thing and what listKbArticles() merges
+  // into a single row (see its own note) — the shape the first articles this
+  // tool made are in. Returning after the flat half left the directory
+  // standing, listKbArticles() went on finding job.json in it, and the row the
+  // user had just deleted stayed in the rail with the article still open beside
+  // it: the delete read as having silently done nothing until the page was
+  // reloaded. Which half exists is not the question; the article is the slug.
+  const hasFlat = existsSync(flatAbs);
+  const hasDir = existsSync(dirAbs) && statSync(dirAbs).isDirectory();
+  if (!hasFlat && !hasDir) throw new Error(`no article "${slug}" found in kb/ to delete`);
+
+  if (hasFlat) {
     unlinkSync(flatAbs);
     const commentsAbs = resolveOut(`${slug}.comments.json`);
     if (existsSync(commentsAbs)) unlinkSync(commentsAbs);
     const historyAbs = resolveOut(`${slug}.history`);
     if (existsSync(historyAbs)) rmSync(historyAbs, { recursive: true, force: true });
+    // Read before the directory goes: jobLogPath() answers "<slug>/job-log.json"
+    // while kb/<slug>/ is still there and "<slug>.job-log.json" once it is not.
     const logAbs = jobLogPath(slug);
     if (existsSync(logAbs)) unlinkSync(logAbs);
-    return { deleted: slug };
   }
-  const jobAbs = resolveOut(path.join(slug, "job.json"));
-  if (existsSync(jobAbs)) {
-    rmSync(resolveOut(slug), { recursive: true, force: true });
-    return { deleted: slug };
-  }
-  throw new Error(`no article "${slug}" found in kb/ to delete`);
+  // kb/<slug>/ is this article's own directory by the convention the whole
+  // module is built on — job.json, its captures, comments.json and history/ all
+  // resolve into it — so it goes with the article, which is also what the
+  // confirmation the user answered promised.
+  if (hasDir) rmSync(dirAbs, { recursive: true, force: true });
+  return { deleted: slug };
 }
 
 const IMAGE_MIME = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp" };
@@ -854,7 +871,7 @@ function assembleMarkdown(job, mdAbs) {
     out.push(`## ${n}. ${(s.heading || "").trim()}`.trim(), "");
     if (s.out) out.push(`![${(s.heading || `Bước ${n}`).replace(/[[\]]/g, "")}](${relFromMd(s.out)})`, "");
     if (s.body) out.push(s.body.trim(), "");
-    for (const note of s.notes || []) out.push(`> **${note.kind || "Note"}:** ${note.text}`, "");
+    out.push(...noteLines(s.notes));
   }
   if (job.outro) out.push(job.outro.trim(), "");
   return out.join("\n");
@@ -1029,7 +1046,7 @@ function buildMcpServer() {
         frameId: z.number().int().optional().describe("Frame the selector lives in (from snap_frame_list). Omit for the top frame."),
         frameUrlContains: z.string().optional().describe("Fallback for frameId: substring of the frame's URL."),
         pad: z.number().optional().describe("Pixels to grow a highlight/blur/spotlight box beyond the element. Defaults to 6 scaled to the capture's size."),
-        side: z.enum(["left", "right", "top", "bottom"]).optional().describe("Which side of the element to put a step/label/textbox on, or which side an arrow comes in from. Default \"left\" — the empty gutter in an app screenshot is usually on the left. Never overlaps the element on any setting."),
+        side: z.enum(["left", "right", "top", "bottom"]).optional().describe("Which side of the element to put a step/label/textbox on, or which side an arrow comes in from. Omit it and the side is chosen for you: whichever one the callout+arrow pair actually fits on, or — for an arrow — the side the callout it comes from is already on. Never overlaps the element on any setting."),
         toSelector: z.string().optional().describe("arrow only: draw from the element in `selector` to this one instead of from empty space. Both endpoints stop just outside their element."),
         fromId: z.string().optional().describe("arrow only: the id of an annotation already on this capture (snap_add returns one for every element it adds) that this arrow starts at — normally the step/label/textbox the arrow leads away from. Its real box is measured, so the tail lands just outside the pill instead of inside its text, and the length becomes the gap between the two. Omit it and the nearest callout in the arrow's own corridor is used automatically; pass it when several callouts sit on the same side."),
         gap: z.number().optional().describe("arrow only: how far short of the target edge the head stops — also the clearance the tail leaves at the callout end. Default 14 scaled to the capture."),
@@ -1070,8 +1087,12 @@ function buildMcpServer() {
         if (type === "arrow") {
           const plan = arrowPlacement(r, { ...at, from: canvas.from, candidates: canvas.callouts }, k, frame, props);
           computed = { x1: plan.x1, y1: plan.y1, x2: plan.x2, y2: plan.y2 };
+          // Off-axis ends get the kit's curve rather than a straight diagonal —
+          // see arrowPlan(). props still wins, so an author can override it.
+          if (plan.shape) computed.shape = plan.shape;
           note = ` [${where}; comes in from the ${plan.side}, `
             + (plan.from ? `tail on ${plan.from.label}` : "nothing behind it — length fitted to the room on that side")
+            + (plan.shape ? `, curved because the two ends do not line up` : "")
             + "]";
         } else {
           computed = geometryFor(type, r, { ...at, arrows: canvas.arrows }, k, frame, props);
@@ -1308,27 +1329,32 @@ function buildMcpServer() {
   // The one write this server allows outside kb/, and the reason is the whole
   // point of the playbook: a lesson learned by a session that cannot edit
   // files dies with that session, and the same annotation lands in the same
-  // wrong place next week. Append-only, one fixed file, size-capped — it can
-  // add a line to the log, it cannot rewrite the rules above it.
+  // wrong place next week.
+  //
+  // Append-only for HISTORY, not for AUTHORITY. A bullet is never deleted or
+  // reworded, but `supersedes` lets the session that DISPROVES one retire it,
+  // and kb-playbook.js then stops feeding it to future jobs. Until that
+  // existed, two learnings that had inferred an "engine limitation" from a
+  // couple of guesses at a prop name sat in every job's system prompt for
+  // weeks, and one of them cost a whole article its step markers. Fixed file,
+  // size-capped, two edit shapes: it can add to the log and retire an entry,
+  // it cannot rewrite the rules above it.
   mcp.registerTool("snap_learn", {
-    description: "Append one dated LEARNING to .claude/skills/kb/PLACEMENT_PLAYBOOK.md — the shared memory of how to place annotations in this repo. Call it when a human correction (usually a pinned comment) taught something a future article should not have to relearn: what was placed wrong, why it was wrong, and the rule that follows. One or two sentences of substance, not \"fixed the arrow\". Append-only: it cannot change or delete what is already there.",
+    description: "Append one dated LEARNING to .claude/skills/kb/PLACEMENT_PLAYBOOK.md — the shared memory of how to place annotations in this repo. Call it when a human correction (usually a pinned comment) taught something a future article should not have to relearn: what was placed wrong, why it was wrong, and the rule that follows. One or two sentences of substance, not \"fixed the arrow\". The date AND the learning's id are stamped for you — do not type a date into the text. The log is append-only for history: nothing you send can delete or reword a bullet that is already there. What you CAN do is retire one you have proved wrong — see supersedes.",
     inputSchema: {
-      text: z.string().describe("The learning: what was placed wrong · why · the rule it implies. Written for whoever places the next annotation, not as a changelog entry."),
+      text: z.string().describe("The learning: what was placed wrong — why — the rule it implies. Written for whoever places the next annotation, not as a changelog entry."),
+      supersedes: z.string().optional().describe("Id of a learning this one proves WRONG, e.g. \"L-2026-08-30-a\" — every bullet prints its id next to its date. The old bullet keeps its text and gets a SUPERSEDED marker, and stops being sent to future jobs. Use it when you have actually disproved the claim (snap_kit shows the prop it called impossible; the fix it prescribed made things worse), not when you are merely adding detail — a learning that refines another one is just a new learning."),
     },
-  }, async ({ text: learning }) => {
+  }, async ({ text: learning, supersedes }) => {
     const body = String(learning || "").trim();
     if (body.length < 20) throw new Error("a learning that short teaches nothing — say what was wrong, why, and the rule it implies.");
     if (body.length > 1200) throw new Error(`${body.length} characters is too long for one learning (max 1200) — keep it to the rule, not the whole session.`);
-    const abs = path.join(REPO_ROOT, ".claude", "skills", "kb", "PLACEMENT_PLAYBOOK.md");
+    const abs = playbookPath(REPO_ROOT);
     if (!existsSync(abs)) throw new Error(`${abs} does not exist — nothing to append to.`);
-    const today = new Date().toISOString().slice(0, 10);
-    const existing = readFileSync(abs, "utf8");
-    const eol = existing.includes("\r\n") ? "\r\n" : "\n";
-    // Indent continuation lines so the bullet keeps the shape of the ones
-    // already in LEARNINGS — the file is read by humans as often as by models.
-    const wrapped = body.split(/\r?\n/).map((l, i) => (i === 0 ? `- **${today}** — ${l}` : `  ${l}`)).join(eol);
-    writeFileSync(abs, existing.replace(/\s*$/, "") + eol + eol + wrapped + eol, "utf8");
-    return text(`Appended a LEARNING dated ${today} to PLACEMENT_PLAYBOOK.md.`);
+    const { id, date, retiredId } = appendLearning(abs, { text: body, supersedes });
+    return text(`Appended LEARNING ${id} (${date}) to PLACEMENT_PLAYBOOK.md${retiredId
+      ? `, and retired ${retiredId}: it keeps its text in the file but is no longer sent to future jobs.`
+      : "."}`);
   });
 
   mcp.registerTool("snap_frame_list", {

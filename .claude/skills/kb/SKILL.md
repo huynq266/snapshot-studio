@@ -8,6 +8,14 @@ description: Dựng một bài KB (markdown + ảnh chụp có chú thích) từ
 Bạn đọc spec, lên kế hoạch từng bước, lái Chrome thật để chụp, chú thích, rồi ghi bài viết.
 Người dùng duyệt.
 
+**Có ba đường vào, và luật khác nhau — xác định mình đang ở đâu trước đã:**
+
+| Đường vào | Ai làm |
+|---|---|
+| Gõ `/kb` trong một phiên Claude Code thường | **Bạn, một mình**, hết mục "Quy trình" bên dưới. Không có ai soi lại — mục 6 (nhìn bằng mắt) là lớp kiểm duy nhất |
+| KB Studio → **"+ New job"** | **Ba agent nối tiếp**: capture → write → review, cộng fix round. Xem mục *Job "author"* |
+| KB Studio → gõ prompt dưới một bài đã có | **Một agent, không browser**. Xem mục *Job "revise"* |
+
 **Đọc `PLACEMENT_PLAYBOOK.md` cạnh file này TRƯỚC khi đặt annotation đầu tiên** — nó chứa hệ
 toạ độ của repo này (canvas **không** cố định), ngữ nghĩa `x/y` khác nhau theo từng type, và
 các luật rút ra từ lỗi đã ship thật.
@@ -20,11 +28,14 @@ các luật rút ra từ lỗi đã ship thật.
   thật (xem `KB-BRIDGE.md` 5.2) — không tự đăng nhập hộ.
 - Nếu là topology B (spawn từ UI KB Studio): job **dùng đúng các tab người dùng đã đưa vào
   session**, nhưng phải mở đường trước. Gọi `mcp__chrome__navigate` **không kèm `tabId`** đúng
-  một lần — chính thao tác đó làm tab group của phiên thành hình; ngay sau đó snap-bridge kéo
-  các tab session vào group ấy. Từ đó truyền thẳng **tabId của tab người dùng** cho mọi
-  `snap_capture_tab`/`snap_frame_*`/`snap_add`'s `at.tabId` (các tool này không tự nhận tabId
-  mặc định như `mcp__chrome__*`). Cái được: trang vẫn đang ở đúng chỗ người dùng đã cuộn / mở
-  panel / điền dở trước khi bấm Start — thường đúng là state bài viết cần chụp.
+  một lần — thao tác đó mở một tab tạm, và chính nó làm tab group của phiên thành hình; ngay
+  sau đó snap-bridge kéo các tab session vào group ấy **rồi đóng tab tạm đi**. Từ đó truyền
+  thẳng **tabId của tab người dùng** cho mọi `snap_capture_tab`/`snap_frame_*`/`snap_add`'s
+  `at.tabId`. Cái được: trang vẫn đang ở đúng chỗ người dùng đã cuộn / mở panel / điền dở
+  trước khi bấm Start — thường đúng là state bài viết cần chụp.
+  **Luôn kèm `tabId`, kể cả cho `mcp__chrome__*`.** Sau lần navigate đầu tiên bạn không còn tab
+  riêng nào để mặc định về nữa, nên lệnh thiếu `tabId` sẽ rơi vào một tab BẤT KỲ của người dùng
+  trong group — và navigate nhầm tab đó là xoá sạch đúng cái state bạn được giao.
   **Nếu một tab không dùng được** (đã pin, đã đóng, hoặc log báo không kéo được) thì lùi về
   cách cũ cho riêng tab đó: navigate tab của chính job tới URL ấy rồi tự bấm về đúng màn hình.
   Điều hướng chỉ được trong đúng **origin** của các URL trong session, nơi khác bị từ chối;
@@ -51,7 +62,7 @@ các luật rút ra từ lỗi đã ship thật.
 | `snap_comment_resolve` | Đóng một comment, sau khi đã sửa **và** đã nhìn ảnh render lại |
 | `snap_job` | Đọc / ghi đè `job.json` của một bài — sửa `els` khi phiên không có tool sửa file |
 | `snap_view` | **Nhìn** một ảnh trong `kb/` — thay cho `Read` khi phiên không đọc được file. `grid:true` phủ lưới toạ độ có nhãn: bắt buộc khi cần **đọc** một con số x/y |
-| `snap_learn` | Append một LEARNING vào `PLACEMENT_PLAYBOOK.md` (chỉ thêm, không sửa được phần đã có) |
+| `snap_learn` | Append một LEARNING vào `PLACEMENT_PLAYBOOK.md`. Ngày và id (`L-<ngày>-<chữ>`) được đóng dấu sẵn. Không xoá/sửa được mục cũ; chứng minh được một mục là sai thì `supersedes: "<id>"` để nó thôi được nạp vào job sau |
 
 `mcp__chrome__*` dùng để điều hướng (`navigate`, `click`, `fill`, `take_screenshot` để *nhìn*).
 **`mcp__chrome__take_screenshot` không ghi file** — ảnh cho bài viết phải từ `snap_capture_tab`.
@@ -145,6 +156,12 @@ phải để người dùng nhìn.
 `els`), `outro`; rồi `snap_render_job({ path: "<slug>/job.json" })` để render mọi ảnh **và**
 ghép bài.
 
+> ⚠️ `notes` mang **hai** shape, tuỳ stage. Lúc capture nó là một **chuỗi** — bàn giao nội bộ
+> cho stage write, và **không** vào bài. Stage write thay nó bằng `[{ kind, text }]` — đó mới là
+> các callout `> **Note:**` người đọc thấy. Renderer chỉ dựng shape thứ hai; shape thứ nhất render
+> ra **rỗng**, đúng như phải thế (`snap-bridge/kb-notes.js`). Viết `notes` phẳng thành mảng chuỗi
+> cũng chạy — chuỗi được hiểu là `text`.
+
 `globalEls` là lớp annotation dùng chung cho **mọi** bước, vẽ dưới `els` của từng bước. Chỗ
 đúng để đặt blur PII: chip tài khoản, tên cửa hàng — thứ nằm cùng một vị trí trên mọi ảnh.
 KB Studio hiện chúng trong bản xem sống ở dạng khoá (không kéo được — chúng thuộc về job).
@@ -189,13 +206,64 @@ là đường chính để họ sửa cách bạn đặt annotation — cụ th�
 5. **`snap_comment_resolve({slug, id, note})`** — `note` một dòng nói bạn đã đổi gì; nó hiện ngay
    trên pin trong KB Studio. Chỉ resolve cái đã thực sự sửa. Cái bạn quyết định **không** sửa thì
    để mở và nói ra, đừng resolve cho sạch bảng.
-6. **Append một LEARNING vào `PLACEMENT_PLAYBOOK.md`** (`snap_learn` nếu không sửa file được) nếu
-   comment đó sửa một quyết định *đặt*
-   (tràn mép, đè target, trỏ vào chỗ trống, lộ PII). Đây là bước duy nhất khiến lần sau không lặp
-   lại — bỏ nó thì vòng review chỉ vá được đúng một bài.
+6. **`snap_learn`** nếu comment đó sửa một quyết định *đặt* (tràn mép, đè target, trỏ vào chỗ
+   trống, lộ PII). Đây là bước duy nhất khiến lần sau không lặp lại — bỏ nó thì vòng review
+   chỉ vá được đúng một bài. Đừng gõ ngày vào nội dung: tool đóng dấu ngày và id cho bạn.
+   Nếu thứ bạn vừa chứng minh **mâu thuẫn** với một learning đang có (id in cạnh ngày của
+   nó), truyền `supersedes` kèm id đó — một learning sai không tự hết hạn.
 
 **Đừng** thêm hay xoá comment hộ người dùng — bộ tool cố tình không có đường đó. Pin là phía họ
 nói; bạn đọc, sửa, và trả lời bằng `note`.
+
+## Job "author" — ba agent nối tiếp, không phải một
+
+Khi bài được dựng từ **KB Studio → "+ New job"**, snap-bridge **không** chạy một agent làm hết
+mọi thứ ở mục "Quy trình" trên. Nó spawn **ba phiên agent nối tiếp nhau**
+(`snap-bridge/kb-job.js`, `runAuthorPipeline`):
+
+| Stage | Có browser | Sở hữu | Bị chặn |
+|---|---|---|---|
+| **capture** | ✅ | ảnh + `els`/`globalEls` + `src`/`out` + `notes` bàn giao | `snap_write_kb` |
+| **write** | ❌ | `title`, `intro`, `heading`, `body`, note cho người đọc, `outro` | mọi `mcp__chrome__*`, mọi snap tool đọc tab sống, và **mọi write đụng lớp visual** |
+| **review** | ❌ | **không sở hữu gì** — chỉ `snap_findings` | tất cả những gì sửa được bài (allow-list 6 tool, không phải deny-list) |
+
+Rồi findings quay ngược lại: **tối đa 2 fix round** (`MAX_FIX_ROUNDS`), mỗi round theo đúng thứ
+tự **capture → write → review**. Ảnh chụp lại có thể làm câu văn mô tả ảnh cũ thành sai, nên
+writer phải nhìn bài ở trạng thái mới nhất; cái mà thứ tự đó vẫn sót là việc của round sau.
+
+**Tách ra KHÔNG phải để chạy song song** — và tuyệt đối không được chạy song song: editor Snap
+Studio mà `snap_open`/`snap_add`/`snap_export` lái là **singleton** (server.js chỉ giữ một
+`lastOpened`), còn `job.json` thì ghi **cả file** một lượt. Hai agent làm cùng lúc là đè
+annotation của nhau. Tách ra là để **đổi context**: agent vừa tiêu bốn mươi lượt tool lái Chrome
+là kẻ tệ nhất để phán ảnh export ra có đọc được không — context của nó đầy thứ nó *định* vẽ.
+Stage chỉ có PNG và playbook thì nhìn thấy **pixel thật**.
+
+### Nếu bạn LÀ một trong ba stage
+
+Mỗi stage được nạp **nguyên `SKILL.md` + `PLACEMENT_PLAYBOOK.md`** rồi mới chồng preamble riêng
+của stage lên trên. Mọi luật đặt annotation, xác minh và dọn dẹp ở trên vẫn ràng buộc bạn; chỗ
+nào tài liệu này giao cho bạn việc của stage khác thì **preamble thắng**.
+
+- **Gọi tool bị từ chối là ranh giới, không phải lỗi cấu hình.** Đừng thử lại, đừng đi đường vòng.
+  Nói ra trong message cuối — nó sẽ được route tới stage thật sự làm được.
+- **capture**: đừng viết prose. `body` để trống hoặc một dòng dữ kiện, không viết `intro`/`outro`.
+  `notes` (một **chuỗi**) **chính là** bàn giao — viết cho người không mở được app; nó không
+  vào bài, stage write mới biến nó thành callout. Vẫn phải `snap_view` từng ảnh
+  và ghi `job.json` sau **mỗi** bước (mục 6b), không gom cuối.
+- **write**: `snap_view` **mọi** ảnh trước khi viết một chữ về nó. `notes` cho biết capture agent
+  *biết* gì; ảnh cho biết người đọc *thấy* gì — lệch nhau thì tin ảnh và nói ra. Callout cho
+  người đọc thì **ghi đè** `notes` bằng `[{ kind, text }]`, đừng để nguyên chuỗi của capture. File `.md` là
+  **sinh ra** từ `job.json`; sửa tay vào nó sẽ bị lần render sau ghi đè.
+- **review**: `snap_findings` **đúng một lần**, cuối cùng. Mỗi finding phải có `owner`
+  (`capture` cho mọi thứ thuộc hình ảnh — chụp lại, dời/sửa/xoá annotation; `write` cho chữ),
+  `severity` (`blocker` chỉ khi để nguyên là sai hoặc gây hiểu lầm; còn lại là nit), và `verdict`
+  `pass` **chỉ khi** không còn blocker — `pass` là cái kết thúc vòng lặp và ship bài. Comment
+  người dùng ghim (`snap_comments`) là finding đã có người thật đứng sau: **route, đừng resolve**.
+  Lỗi bạn thấy mà không file là lỗi không ai sửa.
+
+Hết 2 round mà còn finding mở thì bài **vẫn** hoàn tất và vẫn render, nhưng số finding còn lại
+được in thẳng vào log job và lưu ở `kb/<slug>/review.json` — không nuốt im lặng, vì "done" không
+được phép đọc thành "đã review sạch".
 
 ## Job "revise" — khi người dùng gõ prompt thẳng trong KB Studio
 
@@ -232,8 +300,10 @@ Tuyệt đối không dời annotation sang một target không có trong ảnh 
 
 ## Khi người dùng sửa lại chỗ đặt của bạn
 
-Append một LEARNING vào `PLACEMENT_PLAYBOOK.md`: ngày · đặt sai thế nào · vì sao sai · luật rút
-ra. Playbook chỉ có giá trị nếu được cập nhật; không cập nhật thì 2 tuần nữa nó là tài liệu chết.
+`snap_learn`: đặt sai thế nào · vì sao sai · luật rút ra (ngày và id do tool đóng dấu).
+Playbook chỉ có giá trị nếu được cập nhật; không cập nhật thì 2 tuần nữa nó là tài liệu chết.
+Và nếu lần sửa này chứng minh một learning cũ là sai thì `supersedes` nó, đừng chỉ thêm
+một mục mới bên cạnh — hai luật trái nhau trong cùng một prompt thì job sau chọn bừa.
 
 Áp dụng như nhau dù họ sửa bằng comment ghim (vòng review ở trên) hay chỉ nói trong chat — comment
 chỉ là kênh chính xác hơn, không phải một việc khác.

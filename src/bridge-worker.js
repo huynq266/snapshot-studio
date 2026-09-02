@@ -304,7 +304,18 @@ async function cmdAdoptTabs(args) {
     }
   }
   saveAdopted();
-  return { groupId, adopted, skipped };
+  // The tab the job opened has done its only job: existing, so that Chrome
+  // Bridge had a group to hand us. Leaving it behind is what the user sees as
+  // "it still opens a new tab", and it is pure clutter once their own tabs are
+  // in the group — a tool call with no tabId falls back to any tab in the
+  // group, verified against a live session, so closing this one does not strand
+  // the job. Only when something was actually adopted: with nothing adopted it
+  // is the job's ONLY tab and closing it would end the run.
+  let jobTabClosed = false;
+  if (adopted.length) {
+    try { await chrome.tabs.remove(jobTabId); jobTabClosed = true; } catch (e) {}
+  }
+  return { groupId, adopted, skipped, jobTabClosed };
 }
 
 async function cmdReleaseTabs(args) {

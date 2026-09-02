@@ -330,6 +330,37 @@ use new_tab) to make it visible here" — tức tab được kéo vào group là
 ra sai thì thiệt hại bằng không: `adopt_tabs` trả `skipped`/lỗi, job rơi về đúng hành vi của mục
 2026-08-28.
 
+#### Chạy thật rồi: adopt hoạt động, và tab tạm được đóng lại (2026-09-02, cùng ngày, sau khi merge)
+
+Job thật đầu tiên sau khi merge trả lời luôn ẩn số ghi ở cuối mục trên: **Chrome Bridge soát theo
+group-membership tại thời điểm gọi**, không theo danh sách tabId nó tự mở. Tab người dùng được
+`chrome.tabs.group()` kéo vào là tab nó chấp nhận — đúng vế mà `list_tabs` help text đã ám chỉ.
+Vế "về cấu trúc không khả thi" của mục 2026-08-28 chính thức khép lại.
+
+Nhưng người dùng báo tiếp: **vẫn thấy một tab mới nằm lại**. Đúng — tab đó là bắt buộc để group
+thành hình, nhưng chỉ bắt buộc **trong khoảnh khắc đó**; xong việc thì nó là rác.
+
+**Đo trước khi sửa** (phiên Claude Code thật, không phải job): mở tab A bằng `navigate`, mở thêm
+tab B bằng `new_tab` (cùng group), **đóng A**, rồi gọi `navigate` **không kèm tabId** → Chrome
+Bridge **dùng lại B**, không đẻ tab mới. Hai kết luận:
+
+1. Đóng tab tạm là **an toàn** — phiên không chết, Bridge tự rơi về tab còn lại trong group. Nên
+   `cmdAdoptTabs` giờ `chrome.tabs.remove(jobTabId)` ngay sau khi adopt được ít nhất một tab, và
+   trả thêm `jobTabClosed`. **Chỉ khi adopt được ≥1 tab** — không adopt được gì thì tab tạm là tab
+   DUY NHẤT của job, đóng nó là kết liễu luôn lần chạy.
+2. Không cần chặn cứng lệnh thiếu `tabId` để tránh đẻ tab mới — nhưng **vẫn phải ép agent ghi
+   `tabId`**, vì lý do khác và tệ hơn: lệnh thiếu `tabId` giờ rơi vào một tab **của người dùng**,
+   và `navigate` nhầm tab đó là xoá đúng cái state cuộn/panel/form mà cả tính năng này sinh ra để
+   giữ. System prompt và SKILL.md nói thẳng điều đó.
+
+`kb-job.js` theo dõi `jobTabClosed` để cổng `canUseTool` thôi chấp nhận `jobTabId` sau khi tab đã
+đóng (trước đó nó vẫn nằm trong danh sách "tab của job"), còn `jobTabId` chỉ còn vai trò đánh dấu
+"đã navigate chưa".
+
+**Đánh đổi đã chọn**: job không còn tab nháp riêng. Cần một màn hình khác thì phải `navigate`
+chính tab của người dùng (trong origin cho phép) — tức chấp nhận làm mất state của tab đó. Đổi
+lại là đúng thứ người dùng yêu cầu: không có tab lạ nào nằm lại sau khi job chạy.
+
 ### Ảnh chụp bị ám vàng/cam — xác nhận không phải Chrome Bridge, không phải Night Light, nguồn thật chưa chốt (2026-08-28)
 
 Người dùng báo ảnh trong `kb/img/test-01-nav*.png` và `kb/demo-job/01-nav.png` bị dính một lớp

@@ -56,6 +56,10 @@ function makeEnv(tabs, sessionIds, liveGroups = []) {
           if (!t) throw new Error("No tab");
           t.groupId = NONE;
         },
+        async remove(id) {
+          if (!byId.has(id)) throw new Error(`No tab with id: ${id}.`);
+          byId.delete(id);
+        },
         onRemoved: { addListener() {} },
       },
       storage: {
@@ -91,6 +95,7 @@ console.log("1. the session's tabs move into the job's group, and come back");
   check("both adopted", r.adopted.length === 2, r);
   check("tab 1 is in the job's group", env.byId.get(1).groupId === 7);
   check("tab 2 is in the job's group", env.byId.get(2).groupId === 7);
+  check("the throwaway tab the job opened is closed again", r.jobTabClosed === true && !env.byId.has(100), r);
   const rel = await env.cmdReleaseTabs({});
   check("both released", rel.released.length === 2, rel);
   check("tab 1 went back to no group", env.byId.get(1).groupId === NONE);
@@ -106,6 +111,7 @@ console.log("2. a pinned tab is skipped rather than unpinned behind the user's b
   const r = await env.cmdAdoptTabs({ jobTabId: 100, tabIds: [1] });
   check("skipped with a reason the agent can act on", r.skipped.length === 1 && /pinned/.test(r.skipped[0].reason), r);
   check("left exactly where it was", env.byId.get(1).groupId === NONE);
+  check("the job keeps its own tab, having got nothing to work in", r.jobTabClosed === false && env.byId.has(100), r);
 }
 
 console.log("3. a tab the user never added is refused, even when the bridge asks for it");
