@@ -453,6 +453,11 @@ body.render .lab, body.render .library, body.render .kb, body.render .viewtabs {
 .kb-jobboard-run[data-status="running"] .kb-jobboard-item-title::before { color: var(--color-warning-500); }
 .kb-jobboard-run[data-status="done"] .kb-jobboard-item-title::before { color: var(--color-success-700); }
 .kb-jobboard-run[data-status="error"] .kb-jobboard-item-title::before { color: var(--down); }
+/* Paused is its own colour rather than the muted default a cancelled run
+   falls back to: the run is still in flight and still holding the session
+   tabs, and the only thing standing between it and finishing is someone
+   pressing Resume. */
+.kb-jobboard-run[data-status="paused"] .kb-jobboard-item-title::before { color: var(--color-info-500); }
 
 /* ---- bridge-down state in the Articles rail ------------------------------
    Warning tones, not error tones: nothing is broken or lost — a process is
@@ -840,4 +845,8 @@ body.render .kbs-modal { display: none !important; }
    actually rendering editor.html (via file://) and looking, not by reading
    the JS, which looked correct in isolation. */
 .kb-banner[hidden] { display: none; }
+/* Paused keeps the banner up — the job is still there, still holding its
+   session tabs — but drops the amber, which is the colour of something
+   happening right now. */
+.kb-banner--paused { background: var(--color-info-50); border-color: var(--color-info-500); color: var(--color-info-700); }
 .pal-btn small { font-weight: var(--weight-medium); font-size: 10.5px; color: var(--muted); margin-left: 3px; }

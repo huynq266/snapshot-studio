@@ -51,6 +51,7 @@
     const sessionRefreshBtn = $('#kbSessionRefresh');
     const startBtn = $('#kbStartBtn');
     const stopBtn = $('#kbStopBtn');
+    const pauseBtn = $('#kbPauseBtn');
     const statusNote = $('#kbStatusNote');
     const logEl = $('#kbLog');
     const banner = $('#kbBanner');
@@ -140,7 +141,7 @@
     let sessionTabs = [];       // tabs already added — {id, title, url}
     let candidateTabs = [];     // other open tabs, not yet added
     let jobId = null;
-    let jobStatus = 'idle';   // idle | running | done | error | cancelled
+    let jobStatus = 'idle';   // idle | running | paused | done | error | cancelled
     let jobMode = 'author';   // 'author' (+ New job, drives a browser) | 'revise' (prompt box on an article)
     let jobSlug = null;       // the article a revise job is working on — and, once an authoring run hands over, the article that run's log belongs to
     let jobLog = [];          // the running (or last) job's lines, held apart from the DOM so the log outlives the panel it was painted into. See paintLog().
@@ -360,7 +361,7 @@
       btn.type = 'button';
       btn.textContent = glyph;
       btn.title = title;
-      btn.disabled = jobStatus === 'running';
+      btn.disabled = jobStatus === 'running' || jobStatus === 'paused';   // a paused job still owns its session tabs
       btn.addEventListener('click', onClick);
       li.append(label, btn);
       return li;
@@ -1720,7 +1721,9 @@
         const count = `${n} step${n === 1 ? '' : 's'}`;
         jobPreviewTitle.textContent = jobStatus === 'running'
           ? `Building \u201c${jobPreviewName}\u201d \u2014 ${count} so far`
-          : `\u201c${jobPreviewName}\u201d \u2014 ${count}`;
+          : jobStatus === 'paused'
+            ? `Paused \u2014 \u201c${jobPreviewName}\u201d, ${count} so far`
+            : `\u201c${jobPreviewName}\u201d \u2014 ${count}`;
         jobPreviewOpen.hidden = false;
         // The markdown is assembled once, near the end of the job; until then
         // job.json is the only thing that exists, and rendering it is the whole
@@ -1770,7 +1773,7 @@
       boardRunBtn.dataset.status = runEntry.status;
       boardRunTitle.textContent = runEntry.title || 'New job';
       boardRunMeta.textContent = {
-        running: 'Running now', done: 'Finished', error: 'Failed', cancelled: 'Cancelled',
+        running: 'Running now', paused: 'Paused', done: 'Finished', error: 'Failed', cancelled: 'Cancelled',
       }[runEntry.status] || runEntry.status;
     }
     function setRunEntry(patch) {
@@ -1832,22 +1835,37 @@
     // ---- UI state -------------------------------------------------------------
     function updateControls() {
       const running = jobStatus === 'running';
-      startBtn.hidden = running;
-      stopBtn.hidden = !running;
-      startBtn.disabled = running || !instructionInput.value.trim() || !sessionTabs.length;
-      instructionInput.disabled = uploadBtn.disabled = sessionRefreshBtn.disabled = running;
+      const paused = jobStatus === 'paused';
+      // A paused job still exists, still owns its session tabs and still
+      // blocks a second one (kb-job.js's startJob refuses while paused), so
+      // everything that locks during a run stays locked — the only difference
+      // is which of Pause/Resume the one button offers.
+      const busy = running || paused;
+      startBtn.hidden = busy;
+      stopBtn.hidden = !busy;
+      // Author only: a revise job is a single short turn that resumes by
+      // typing another instruction, so kb-job.js refuses to pause one.
+      pauseBtn.hidden = !busy || jobMode !== 'author';
+      pauseBtn.textContent = paused ? '▶ Resume' : '⏸ Pause';
+      startBtn.disabled = busy || !instructionInput.value.trim() || !sessionTabs.length;
+      instructionInput.disabled = uploadBtn.disabled = sessionRefreshBtn.disabled = busy;
       // One job at a time is enforced by the bridge (kb-job.js keeps a single
       // currentJob), so an authoring job locks this box too — better a
       // disabled button than a rejected start the user has to read an error for.
-      articleSendBtn.disabled = running || !selectedSlug || !articlePrompt.value.trim();
-      articlePrompt.disabled = running;
-      articleNewSessionBtn.disabled = running || !selectedSlug || !articleHasSession;
+      articleSendBtn.disabled = busy || !selectedSlug || !articlePrompt.value.trim();
+      articlePrompt.disabled = busy;
+      articleNewSessionBtn.disabled = busy || !selectedSlug || !articleHasSession;
       statusNote.textContent = {
         idle: 'No job running', running: `Running — ${jobInstruction ? jobInstruction.slice(0, 60) : ''}`,
+        paused: 'Paused — Resume picks the same conversation back up.',
         done: 'Last job finished successfully.', error: 'Last job failed — see log.',
         cancelled: 'Last job was cancelled.',
       }[jobStatus] || jobStatus;
-      banner.hidden = !running;
+      banner.hidden = !busy;
+      banner.classList.toggle('kb-banner--paused', paused);
+      banner.textContent = paused
+        ? '⏸ KB job paused — the agent has stopped where it was; Resume continues it.'
+        : '⚙ KB job running — the agent is drawing on its own canvas in the KB tab.';
     }
     function setStatus(s) {
       jobStatus = s;
@@ -2079,6 +2097,27 @@
       reloadFromDisk();
     }
 
+    /** One button, both directions — which one it is right now is whatever
+     *  updateControls() last labelled it, which is jobStatus and nothing else.
+     *  The status is set from the reply rather than optimistically: a resume
+     *  that the bridge refuses (the job ended underneath us, another tab
+     *  resumed it first) must not leave this tab showing a running job that
+     *  is not. */
+    pauseBtn.addEventListener('click', async () => {
+      if (!jobId) return;
+      const resuming = jobStatus === 'paused';
+      pauseBtn.disabled = true;
+      try {
+        await callBg(resuming ? 'resume' : 'pause', { id: jobId });
+        setStatus(resuming ? 'running' : 'paused');
+        toast(resuming ? 'Job resumed — picking up where it stopped.' : 'Job paused.');
+      } catch (e) {
+        toast(`Could not ${resuming ? 'resume' : 'pause'} the job: ` + e.message);
+      } finally {
+        pauseBtn.disabled = false;
+      }
+    });
+
     stopBtn.addEventListener('click', async () => {
       if (!jobId) return;
       stopBtn.disabled = true;
@@ -2123,7 +2162,7 @@
         // Reopening or reloading the tab mid-job lands where Start would have
         // left you. A job that has already ended does not steal the view — its
         // screen is one click away in the rail.
-        if (job.status === 'running') selectRunningJob(true);
+        if (job.status === 'running' || job.status === 'paused') selectRunningJob(true);
         resetJobPreview();
         showJobPreview(true);
         // NOT reset: the canvas survives a page reload only if nothing clears

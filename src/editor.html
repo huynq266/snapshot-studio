@@ -70,7 +70,11 @@
       <span class="tb-note" id="kbStatusNote">No job running</span>
       <!-- Stop stays in the toolbar on purpose: a job keeps running while you
            click through to an article, and it has to be cancellable from there
-           too. Start moved into the New job form — see .kb-new-job-form below. -->
+           too. Start moved into the New job form — see .kb-new-job-form below.
+           Pause sits beside it and is one button, not two: it is the same job
+           either way, and a "Resume" that appears somewhere else while "Pause"
+           greys out reads as two controls for one decision. -->
+      <button id="kbPauseBtn" class="btn sm" hidden>⏸ Pause</button>
       <button id="kbStopBtn" class="btn sm" hidden>■ Stop</button>
     </div>
   </header>

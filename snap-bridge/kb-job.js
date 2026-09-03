@@ -221,8 +221,10 @@ export function noteJobSlug(slug) {
  *  no session tabs) — caller-visible errors, not job-state errors, since no
  *  job object exists yet. */
 export function startJob({ mode, slug, context, instruction, markdown, mdFilename, sessionTabs, onProgress, snapSelf }) {
-  if (currentJob && currentJob.status === "running") {
-    throw new Error("a KB job is already running — wait for it to finish or cancel it first.");
+  if (currentJob && (currentJob.status === "running" || currentJob.status === "paused")) {
+    throw new Error(currentJob.status === "paused"
+      ? "a KB job is paused — resume or cancel it before starting another."
+      : "a KB job is already running — wait for it to finish or cancel it first.");
   }
   if (!instruction || !instruction.trim()) throw new Error("instruction is empty.");
 
@@ -287,7 +289,13 @@ export function startJob({ mode, slug, context, instruction, markdown, mdFilenam
 
 export function cancelJob(id) {
   if (!currentJob || currentJob.id !== id) throw new Error("no such running job.");
-  if (currentJob.status !== "running") throw new Error(`job is already ${currentJob.status}.`);
+  // A PAUSED job is cancellable too, and has to be: it still holds this
+  // process's one job slot, so "I am not going to resume that" needs somewhere
+  // to land other than starting an article you do not want just to free the
+  // slot. The interrupt below is then a no-op — pauseJob already made it.
+  if (currentJob.status !== "running" && currentJob.status !== "paused") {
+    throw new Error(`job is already ${currentJob.status}.`);
+  }
   if (currentJob._query && typeof currentJob._query.interrupt === "function") {
     currentJob._query.interrupt().catch(() => {});
   }
@@ -299,6 +307,57 @@ export function cancelJob(id) {
   // on disk by the time this call answers, not whenever the stream gives up.
   writeJobLog(currentJob);
   return true;
+}
+
+/** Same interrupt cancelJob() makes, but the job object survives it: status
+ *  goes to "paused" instead of a terminal one, and job._ctx/_phase/
+ *  _pipelineRound/_findings/_sessions — everything driveAuthorPipeline() needs
+ *  to pick the article back up — are left exactly as the interrupted stage
+ *  left them. Author jobs only: a revise job is one short turn already
+ *  resumable by typing another instruction (reviseSessions, keyed by slug,
+ *  outlives any one job/turn), so "pause" would just be a second name for
+ *  "cancel" there. */
+export function pauseJob(id) {
+  if (!currentJob || currentJob.id !== id) throw new Error("no such running job.");
+  if (currentJob.status !== "running") throw new Error(`job is already ${currentJob.status}.`);
+  if (currentJob.mode !== "author") {
+    throw new Error("only an authoring job can be paused — a revise job is one short turn; cancel it, and typing a follow-up instruction continues the same conversation on its own.");
+  }
+  if (currentJob._query && typeof currentJob._query.interrupt === "function") {
+    currentJob._query.interrupt().catch(() => {});
+  }
+  currentJob.status = "paused";
+  currentJob.log.push(`Paused${currentJob.stage ? ` — mid ${STAGE_TITLES[currentJob.stage] || currentJob.stage}` : ""}. Resume to continue the same conversation.`);
+  writeJobLog(currentJob);
+  return true;
+}
+
+/** Re-enters driveAuthorPipeline() on the SAME job object pauseJob() left —
+ *  same id, same log, same in-flight article — rather than starting a new
+ *  job. onProgress is re-supplied because it closed over the ORIGINAL push()
+ *  from startJob(), which nothing here still has a reference to. */
+export function resumeJob(id, { onProgress } = {}) {
+  if (!currentJob || currentJob.id !== id) throw new Error("no such job.");
+  if (currentJob.status !== "paused") throw new Error(`job is ${currentJob.status}, not paused.`);
+  const job = currentJob;
+  job.status = "running";
+  job._resumeNote = true;     // consumed by the first stage runStage() starts — see RESUMED_PREAMBLE
+  const push = (line) => {
+    job.log.push(line);
+    if (job.log.length > 500) job.log.shift();
+    try { onProgress && onProgress(line); } catch {}
+  };
+  push("Resumed.");
+  const run = driveAuthorPipeline(job, push);
+  run.catch((e) => {
+    job.status = "error";
+    job.error = String((e && e.message) || e);
+    job.endedAt = Date.now();
+    push(`Job crashed: ${job.error}`);
+  }).finally(() => {
+    writeJobLog(job);   // same reasoning as startJob's own .finally — see there
+  });
+  return { id: job.id };
 }
 
 /* How many times findings may come back after the first review. Two is a
@@ -317,6 +376,15 @@ const STAGE_TITLES = {
   review: "Review — fresh eyes on every image and every line",
 };
 const MODEL = "claude-sonnet-5";
+/* Prepended to the interrupted stage's own prompt on the first stage a resume
+   starts (runStage's resumedAfterPause). The prompt underneath it is verbatim
+   the one that stage was already working from — which is exactly why this has
+   to say so, or it reads as the task being handed out a second time. */
+const RESUMED_PREAMBLE = [
+  "YOU WERE PAUSED BY THE USER MID-TASK AND ARE NOW RESUMED. The conversation above is your own — everything you had already done is in it.",
+  "",
+  "Pick up where you stopped. The instruction below is the SAME one you were already working on, repeated only so it is in front of you: it is not a new task and not a request to start over. Before you redo anything, re-read what is already on disk (snap_job, and snap_view on any image you are unsure about) — a step you had already finished is finished, and the user may have edited something by hand while you were stopped.",
+].join("\n");
 
 function jobJsonPath(slug) {
   return path.join(REPO_ROOT, "kb", slug, "job.json");
@@ -437,9 +505,20 @@ async function runStage(job, push, { name, round, systemPrompt, prompt, mcpServe
     ? `— ${STAGE_TITLES[name] || name} · fix round ${round} —`
     : `— ${STAGE_TITLES[name] || name} —`);
 
+  // Resuming an interrupted stage sends its ORIGINAL prompt into a
+  // conversation that already contains half the work — without a word about
+  // why, an agent reasonably reads "build this article" as "build it again"
+  // and re-shoots screens it already has. Only when there is a conversation
+  // to resume INTO: with no session id this is a fresh start, and telling it
+  // to continue from context it does not have is worse than saying nothing.
+  const resumedAfterPause = !!(job._resumeNote && job._sessions[name]);
+  job._resumeNote = false;
+  const stagePrompt = resumedAfterPause ? `${RESUMED_PREAMBLE}\n\n${prompt}` : prompt;
+  if (resumedAfterPause) push(`Resuming the ${name} conversation where the pause stopped it.`);
+
   const attempt = async (resume) => {
     const q = query({
-      prompt: singleUserMessage(prompt),
+      prompt: singleUserMessage(stagePrompt),
       options: {
         model: MODEL,
         cwd: REPO_ROOT,
@@ -481,7 +560,12 @@ async function runStage(job, push, { name, round, systemPrompt, prompt, mcpServe
     out = await attempt(null);
   }
 
-  if (job.status === "cancelled") return out;
+  // Not just "cancelled": pauseJob() interrupts the same query() cancelJob()
+  // does, and an interrupted stream reports the same not-ok outcome either
+  // way. Anything other than "running" here means a person (or resumeJob's
+  // own caller) already decided what happens next — throwing on top of that
+  // would read as a crash instead of the pause/cancel it actually was.
+  if (job.status !== "running") return out;
   if (!out.ok) throw new Error(`${name} stage: ${out.error}`);
   if (requireAnyOf && !requireAnyOf.some((t) => out.calledTools.has(t))) {
     throw new Error(`the ${name} stage finished without a successful ${requireAnyOf.join(" or ")} call — whatever it decided was never written down.`);
@@ -742,70 +826,119 @@ async function runReviewStage(job, ctx, push, round) {
 
 /* ---- the pipeline ------------------------------------------------------ */
 
+/** One indirection, and only so the pipeline's SEQUENCING can be exercised
+ *  without spawning three agent sessions and a browser — the same reason
+ *  visualSignature and describeToolUse are exported. kb-pipeline.test.mjs
+ *  swaps these for stubs and asserts which stage ran in which round, and what
+ *  a pause landing inside one leaves behind. Nothing else reassigns them. */
+export const STAGE_RUNNERS = {
+  capture: (job, ctx, push, findings, round) => runCaptureStage(job, ctx, push, findings, round),
+  write: (job, ctx, push, findings, round) => runWriteStage(job, ctx, push, findings, round),
+  review: (job, ctx, push, round) => runReviewStage(job, ctx, push, round),
+};
+
+/** Sets the pipeline up, then hands off to driveAuthorPipeline — the part
+ *  pauseJob()/resumeJob() re-enter. job._ctx/_phase/_pipelineRound/_findings
+ *  are the whole of what a resume needs: pauseJob() only interrupts the
+ *  query() in flight (same call cancelJob() makes) and flips job.status,
+ *  leaving this state and — on the SDK's side — job._sessions[stage]'s
+ *  resumable conversation untouched. Nothing here is written to disk, the
+ *  same choice runReviseJob()'s reviseSessions already made: losing it on a
+ *  bridge restart costs a fresh session, not data. */
 async function runAuthorPipeline(job, instruction, markdown, sessionTabs, snapSelf, push) {
   const allowedOrigins = originsOf(sessionTabs);
   if (!allowedOrigins.size) throw new Error("none of this job's session tabs have a URL that could be parsed to navigate to.");
 
-  const ctx = { instruction, markdown, sessionTabs, allowedOrigins, snapSelf, review: null };
+  job._ctx = { instruction, markdown, sessionTabs, allowedOrigins, snapSelf, review: null };
+  job._phase = "capture";        // capture -> write -> review -> decide -> (capture again, or final)
+  job._pipelineRound = 0;        // 0 = the first pass; 1..MAX_FIX_ROUNDS = a fix round
+  job._findings = null;          // {capture, write} for job._pipelineRound, once "decide" sets it
+  return driveAuthorPipeline(job, push);
+}
+
+/** The state machine runAuthorPipeline sets up above — one iteration of the
+ *  for(;;) per phase transition, so a pause landing anywhere (mid-stage, via
+ *  the `if (!running()) return` right after an await; or in the gap between
+ *  two stages, via the check at the top of the loop) leaves job._phase
+ *  pointing at exactly the phase to re-enter. Exported so resumeJob() can
+ *  call it again on the same job object. */
+export async function driveAuthorPipeline(job, push) {
+  const ctx = job._ctx;
   const running = () => job.status === "running";
 
-  await runCaptureStage(job, ctx, push, null, 0);
-  if (!running()) return;
-  // The capture stage is the only one that can name the article — the slug is
-  // stamped onto the job by noteJobSlug() the first time a write goes through
-  // (server.js's pushKbArticleChanged). Without it there is nothing for the next
-  // two stages to open, and continuing would spend two more sessions
-  // discovering that.
-  if (!job.slug) throw new Error("the capture stage finished without writing a job.json — there is no article for the write stage to work on.");
-
-  await runWriteStage(job, ctx, push, null, 0);
-  if (!running()) return;
-
-  ctx.review = await runReviewStage(job, ctx, push, 0);
-  if (!running()) return;
-
-  for (let round = 1; round <= MAX_FIX_ROUNDS; round++) {
-    const review = ctx.review;
-    if (!review || review.verdict === "pass") break;
-    const forCapture = findingsFor(review, "capture");
-    const forWrite = findingsFor(review, "write");
-    if (!forCapture.length && !forWrite.length) {
-      push("Review asked for changes but filed no findings — stopping rather than looping on nothing.");
-      break;
-    }
-    job._reviewRound = round + 1;
-    // Capture first, then write, then review — in that order every round. A
-    // re-shot image can strand the sentence that described the old one, so the
-    // writer should see the article as it now is; and anything that ordering
-    // still misses is what the next review round is for.
-    if (forCapture.length) {
-      await runCaptureStage(job, ctx, push, forCapture, round);
-      if (!running()) return;
-    }
-    if (forWrite.length) {
-      await runWriteStage(job, ctx, push, forWrite, round);
-      if (!running()) return;
-    }
-    ctx.review = await runReviewStage(job, ctx, push, round);
+  for (;;) {
     if (!running()) return;
-  }
+    const round = job._pipelineRound;
 
-  const final = ctx.review;
-  const open = final && final.verdict !== "pass" ? final.findings : [];
-  job.stage = null;
-  job.status = "done";
-  job.endedAt = Date.now();
-  // Not an error: the article exists and is rendered. But "done" must not read
-  // as "reviewed clean" when it is not — and the log is the only place the user
-  // sees this, since KB Studio has no view of review.json yet. Spell the
-  // findings out here rather than pointing at a file they would have to go and
-  // open: a budget that ran out silently is how a known defect ships.
-  if (open.length) {
-    push(`Job finished — article written, but ${open.length} finding(s) still open after ${MAX_FIX_ROUNDS} fix round(s):`);
-    for (const line of formatFindings(open).split("\n")) push(line);
-    push(`(also in kb/${job.slug}/review.json)`);
-  } else {
-    push("Job finished — article written and reviewed clean.");
+    if (job._phase === "capture") {
+      // Round 0 always shoots; a fix round only if the review actually routed
+      // something here. Capture first, then write, then review — in that
+      // order every round: a re-shot image can strand the sentence that
+      // described the old one, so the writer should see the article as it
+      // now is, and anything that ordering still misses is what the next
+      // review round is for.
+      const findings = round > 0 ? job._findings.capture : null;
+      if (round === 0 || findings.length) {
+        await STAGE_RUNNERS.capture(job, ctx, push, findings, round);
+        if (!running()) return;
+        // The capture stage is the only one that can name the article — the
+        // slug is stamped onto the job by noteJobSlug() the first time a
+        // write goes through (server.js's pushKbArticleChanged). Without it
+        // there is nothing for the next two stages to open, and continuing
+        // would spend two more sessions discovering that.
+        if (round === 0 && !job.slug) {
+          throw new Error("the capture stage finished without writing a job.json — there is no article for the write stage to work on.");
+        }
+      }
+      job._phase = "write";
+    } else if (job._phase === "write") {
+      const findings = round > 0 ? job._findings.write : null;
+      if (round === 0 || findings.length) {
+        await STAGE_RUNNERS.write(job, ctx, push, findings, round);
+        if (!running()) return;
+      }
+      job._phase = "review";
+    } else if (job._phase === "review") {
+      ctx.review = await STAGE_RUNNERS.review(job, ctx, push, round);
+      if (!running()) return;
+      job._phase = "decide";
+    } else if (job._phase === "decide") {
+      const nextRound = round + 1;
+      const review = ctx.review;
+      if (!review || review.verdict === "pass" || nextRound > MAX_FIX_ROUNDS) { job._phase = "final"; continue; }
+      const forCapture = findingsFor(review, "capture");
+      const forWrite = findingsFor(review, "write");
+      if (!forCapture.length && !forWrite.length) {
+        push("Review asked for changes but filed no findings — stopping rather than looping on nothing.");
+        job._phase = "final";
+        continue;
+      }
+      job._pipelineRound = nextRound;
+      job._reviewRound = nextRound + 1;
+      job._findings = { capture: forCapture, write: forWrite };
+      job._phase = "capture";
+    } else {
+      // "final"
+      const final = ctx.review;
+      const open = final && final.verdict !== "pass" ? final.findings : [];
+      job.stage = null;
+      job.status = "done";
+      job.endedAt = Date.now();
+      // Not an error: the article exists and is rendered. But "done" must not
+      // read as "reviewed clean" when it is not — and the log is the only
+      // place the user sees this, since KB Studio has no view of review.json
+      // yet. Spell the findings out here rather than pointing at a file they
+      // would have to go and open: a budget that ran out silently is how a
+      // known defect ships.
+      if (open.length) {
+        push(`Job finished — article written, but ${open.length} finding(s) still open after ${MAX_FIX_ROUNDS} fix round(s):`);
+        for (const line of formatFindings(open).split("\n")) push(line);
+        push(`(also in kb/${job.slug}/review.json)`);
+      } else {
+        push("Job finished — article written and reviewed clean.");
+      }
+      return;
+    }
   }
 }
 
@@ -839,7 +972,7 @@ async function consumeStream(q, job, push, opts = {}) {
   const pendingCalls = new Map();      // tool_use id -> name, until its result lands
   let outcome = null;
   for await (const msg of q) {
-    if (job.status === "cancelled") break;
+    if (job.status !== "running") break;   // cancelled or paused — same reasoning as runStage's own check
     // Every message in the stream carries session_id, so take it off the first
     // one that arrives rather than matching one particular init message — that
     // shape belongs to the SDK and can change under us; this cannot.

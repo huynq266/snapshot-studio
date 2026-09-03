@@ -15,7 +15,7 @@ import { WebSocketServer } from "ws";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import { startJob, cancelJob, getCurrentJob, getReviseSession, resetReviseSession, noteJobSlug, currentReviewRound } from "./kb-job.js";
+import { startJob, cancelJob, pauseJob, resumeJob, getCurrentJob, getReviseSession, resetReviseSession, noteJobSlug, currentReviewRound } from "./kb-job.js";
 import { writeReview, summarizeReview, REVIEW_OWNERS, REVIEW_SEVERITIES } from "./kb-review.js";
 import { readJobLog, jobLogPath } from "./kb-log.js";
 import { playbookPath, appendLearning } from "./kb-playbook.js";
@@ -117,6 +117,7 @@ wss.on("connection", (ws, req) => {
     // (those are minted by the bridge itself via randomUUID()), so this is
     // an unambiguous way to multiplex both directions over one connection.
     if (msg.cmd === "kb_start" || msg.cmd === "kb_cancel" || msg.cmd === "kb_query"
+      || msg.cmd === "kb_pause" || msg.cmd === "kb_resume"
       || msg.cmd === "kb_list" || msg.cmd === "kb_read" || msg.cmd === "kb_save_md" || msg.cmd === "kb_read_image"
       || msg.cmd === "kb_job_save" || msg.cmd === "kb_delete"
       || msg.cmd === "kb_comments_list" || msg.cmd === "kb_comments_add"
@@ -211,6 +212,15 @@ function handleKbCommand(ws, msg) {
     } else if (cmd === "kb_cancel") {
       cancelJob(args.id);
       reply(true, {});
+    } else if (cmd === "kb_pause") {
+      pauseJob(args.id);
+      reply(true, {});
+    } else if (cmd === "kb_resume") {
+      // onProgress has to be re-supplied: the original closed over startJob's
+      // push(), which ended with the run that was paused. Same pushKbProgress
+      // kb_start hands in, so the log keeps streaming to whichever client is
+      // connected NOW rather than the one that happened to start the job.
+      reply(true, resumeJob(args.id, { onProgress: pushKbProgress }));
     } else if (cmd === "kb_query") {
       reply(true, { job: getCurrentJob() });
     } else if (cmd === "kb_session") {
