@@ -428,7 +428,7 @@ const REVIEW_ROLE = [
   "Method:",
   "1. snap_job to read the article, then snap_view on EVERY exported image. Use grid:true whenever a judgement depends on READING a coordinate rather than eyeballing it.",
   "2. snap_comments — a pin a human left is a finding that already has a person behind it. Do not resolve them; route them.",
-  "3. Check, at minimum: the playbook's hard rules (#0 nothing overflows the frame, #1 no callout over its own target, #2 the target is present, visible and in the right state IN THIS IMAGE, #6 no PII left showing), #4 step 1 orients in the menu, #5 at least one zoom on a decisive detail; then prose against picture (does the text describe what is actually shown?), heading order, and coverage against the user's instruction — a step the instruction asked for and nobody shot is a finding too.",
+  "3. Check, at minimum: the playbook's hard rules (#0 nothing overflows the frame, #1 no callout over its own target, #2 the target is present, visible and in the right state IN THIS IMAGE, #6 no PII left showing), #4 step 1 orients in the menu, #5 at least one zoom on a decisive detail; then prose against picture (does the text describe what is actually shown?), prose against the reference document if one was attached (a control's real name, what it actually does — the article contradicting the dev team's own doc is a write finding, not a nit), heading order, and coverage against the user's instruction — a step the instruction asked for and nobody shot is a finding too.",
   "4. snap_findings once, at the end. Route each one: owner \"capture\" for anything visual (a re-shoot, or an annotation to move, retype or remove), owner \"write\" for prose. severity \"blocker\" only for something wrong or misleading as it stands; taste is a nit. verdict \"pass\" only when no blocker remains — it ends the loop and ships the article.",
   "5. snap_learn when a finding is a placement rule the next article should not have to relearn. It is the only part of this job that outlives the article.",
   "",
@@ -818,6 +818,9 @@ async function runReviewStage(job, ctx, push, round) {
     "",
     ctx.instruction,
     "",
+    ctx.markdown && ctx.markdown.trim()
+      ? `Reference document the user attached (background, from the dev team — cross-check the article's prose against it; a control's name or behavior the article gets wrong relative to this doc is a write finding):\n\n--- BEGIN REFERENCE ---\n${ctx.markdown}\n--- END REFERENCE ---\n`
+      : "",
     prev && prev.findings.length
       ? [
         "You filed these last round. Check each one specifically — a finding reported twice is worse than a finding reported once, and a fix that was refused should have been argued, not ignored:",
