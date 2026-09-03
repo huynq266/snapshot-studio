@@ -704,6 +704,33 @@ body.render .kbs-modal { display: none !important; }
   padding-left: var(--space-2); }
 .kb-comment-popover-actions { display: flex; justify-content: flex-end; gap: var(--space-2); margin-top: var(--space-2); }
 
+/* Fixed to the viewport instead of position:absolute inside a wrapper — a text
+   comment has no single box to anchor a percentage to the way an image pin's
+   .kb-md-imgwrap does (src/bridge-kb.js's positionFloatPopover/openTextComposer/
+   openTextViewer). Layered on top of .kb-comment-popover's own rule above. */
+.kb-comment-popover--float { position: fixed; }
+.kb-comment-popover .kb-comment-quote { font-style: italic; color: var(--ink-2);
+  border-left: 2px solid var(--accent-line); padding-left: var(--space-2); }
+
+/* A highlighted run of article prose — the text equivalent of .kb-comment-pin
+   above. box-decoration-break so a highlight that wraps across a line gets a
+   rounded background on each line instead of one box spanning the gap between
+   them (src/bridge-kb.js's highlightRange wraps one <mark> per text-node
+   fragment for the same reason). */
+.kb-text-comment-pin { background: var(--accent-soft); border-bottom: 2px solid var(--accent-line);
+  border-radius: var(--radius-sm); cursor: pointer; box-decoration-break: clone; -webkit-box-decoration-break: clone; }
+.kb-text-comment-pin:hover { border-bottom-color: var(--accent); }
+.kb-text-comment-pin--resolved { background: var(--paper); border-bottom-color: var(--line-2); }
+
+/* The "select some text, then click this to comment on it" affordance —
+   follows the selection (src/bridge-kb.js's mouseup handler), so it is
+   positioned inline via style.left/top rather than through this rule. */
+.kb-text-comment-add { position: fixed; z-index: 7; display: flex; align-items: center; gap: var(--space-1);
+  font-family: inherit; font-size: var(--text-xs); font-weight: var(--weight-semibold); line-height: 1;
+  padding: var(--space-1) var(--space-2); border-radius: var(--radius-full); border: none; cursor: pointer;
+  background: var(--accent); color: var(--color-neutral-0); box-shadow: 0 2px 8px rgba(var(--color-neutral-900-rgb),.3); }
+.kb-text-comment-add:hover { filter: brightness(1.1); }
+
 #kbCommentModeBtn.on { background: var(--accent); color: var(--color-neutral-0); border-color: var(--accent); }
 
 .kb-history-wrap { position: relative; }

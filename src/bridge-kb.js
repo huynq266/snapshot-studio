@@ -675,8 +675,16 @@
       // Unsaved annotation edits are safe across this: stepEls is the state, and
       // the surfaces are only its view — every one is rebuilt from that map below.
       destroySurfaces();
+      // A popover or the floating "add comment" affordance lives on document.body
+      // now (text comments are not confined to one .kb-md-imgwrap), so unlike an
+      // image pin it does NOT vanish on its own when the innerHTML below is
+      // thrown away — leaving it stranded, pointed at a paragraph that may no
+      // longer exist.
+      closePopover();
+      removeCommentAffordance();
       articlePreview.innerHTML = md2html(articleEditor.value);
       renderCommentPins();
+      renderTextHighlights();
       hydrateImages(articleCtx(++previewGen));
     }
 
@@ -701,6 +709,7 @@
       if (!historyPanel.hidden && !historyPanel.contains(ev.target) && !historyBtn.contains(ev.target)) closeHistoryPanel();
       if (suppressPopoverAutoClose) { suppressPopoverAutoClose = false; return; }
       if (activePopover && !activePopover.contains(ev.target)) closePopover();
+      if (commentAffordance && !commentAffordance.contains(ev.target)) removeCommentAffordance();
     });
     function renderCommentPins() {
       articlePreview.querySelectorAll('.kb-comment-pin').forEach((p) => p.remove());
@@ -736,6 +745,7 @@
         comments = [];
       }
       renderCommentPins();
+      renderTextHighlights();
     }
     function openComposer(wrap, imgSrc, xNorm, yNorm) {
       closePopover();
@@ -832,6 +842,309 @@
       // the duration; the click then lands on the wrapper, as it always did.
       surfaces.forEach((s) => s.setReadOnly(commentMode));
       closePopover();
+      removeCommentAffordance();
+    });
+
+    // ---- positioned comments on TEXT -----------------------------------------
+    // A second anchor kind on the same comments.json (server.js's addKbComment):
+    // {quote, prefix, suffix, occurrence} instead of {img, xNorm, yNorm}. There
+    // is no (x, y) to speak of — this is prose, hand-rolled from markdown into a
+    // fresh DOM tree on every keystroke (renderPreview() above) — so a highlight
+    // has to be RE-FOUND in whatever the article currently renders to, by
+    // content, not by position. quote is the exact selected text; prefix/suffix
+    // are ~30 characters of surrounding context for the (common) case where that
+    // exact text appears more than once, and occurrence is the tie-breaker for
+    // when even the context repeats (two identical "Click Save." sentences).
+    // None of the three is a stored offset — an unrelated edit elsewhere in the
+    // article cannot silently drag the highlight onto the wrong sentence.
+    const TEXT_ANCHOR_CONTEXT = 30;
+
+    function textNodesIn(root) {
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
+      const nodes = [];
+      let n;
+      while ((n = walker.nextNode())) nodes.push(n);
+      return nodes;
+    }
+    /** The character offset of a Range boundary within root's flattened text.
+     *  Handing this to the browser (rather than walking child/text nodes by
+     *  hand) is what makes an ELEMENT boundary point — e.g. a selection that
+     *  starts right before a <strong>, where startContainer is the <p> and
+     *  startOffset is a child index, not a text offset — resolve correctly for
+     *  free: Range.toString() already flattens exactly the way root.textContent
+     *  does, in the same tree order. */
+    function textOffsetOf(root, node, offset) {
+      const r = document.createRange();
+      r.selectNodeContents(root);
+      r.setEnd(node, offset);
+      return r.toString().length;
+    }
+    /** The reverse direction: a flat offset always lands inside SOME text node
+     *  (by construction, from the search below), so no such element-boundary
+     *  case exists here — a plain walk of textNodesIn() is enough. */
+    function rangeFromOffsets(root, start, end) {
+      const nodes = textNodesIn(root);
+      let pos = 0, startPoint = null, endPoint = null;
+      for (const node of nodes) {
+        const len = node.nodeValue.length;
+        if (startPoint === null && start <= pos + len) startPoint = { node, offset: start - pos };
+        if (endPoint === null && end <= pos + len) endPoint = { node, offset: end - pos };
+        pos += len;
+        if (startPoint && endPoint) break;
+      }
+      if (!startPoint || !endPoint) return null;
+      const range = document.createRange();
+      range.setStart(startPoint.node, Math.max(0, startPoint.offset));
+      range.setEnd(endPoint.node, Math.max(0, endPoint.offset));
+      return range;
+    }
+    /** Every spot `quote` occurs in `full`, narrowed to the ones whose
+     *  surrounding prefix/suffix also match when that narrows anything —
+     *  falling back to every occurrence of the bare quote otherwise, so a
+     *  comment anchored before nearby text was edited can still be found. */
+    function findQuoteOccurrences(full, quote, prefix, suffix) {
+      const all = [];
+      let from = 0;
+      for (let idx; (idx = full.indexOf(quote, from)) !== -1; from = idx + 1) all.push(idx);
+      if (!all.length) return all;
+      const ctx = all.filter((idx) => full.slice(Math.max(0, idx - prefix.length), idx) === prefix
+        && full.slice(idx + quote.length, idx + quote.length + suffix.length) === suffix);
+      return ctx.length ? ctx : all;
+    }
+    /** A just-made selection -> an anchor to save. Null when the selection is
+     *  all whitespace (a comment on nothing is not a comment). */
+    function anchorFromSelection(root, range) {
+      const quote = range.toString();
+      if (!quote.trim()) return null;
+      const full = root.textContent;
+      const startOffset = textOffsetOf(root, range.startContainer, range.startOffset);
+      const prefix = full.slice(Math.max(0, startOffset - TEXT_ANCHOR_CONTEXT), startOffset);
+      const suffix = full.slice(startOffset + quote.length, startOffset + quote.length + TEXT_ANCHOR_CONTEXT);
+      const occurrences = findQuoteOccurrences(full, quote, prefix, suffix);
+      const occurrence = Math.max(0, occurrences.indexOf(startOffset));
+      return { quote, prefix, suffix, occurrence };
+    }
+    /** A saved anchor -> where it falls in the CURRENT render, or null when the
+     *  quote no longer appears at all (the sentence was edited away — same
+     *  silent miss an image pin takes when its img src stops matching). */
+    function locateTextComment(root, comment) {
+      if (!comment || !comment.quote) return null;
+      const full = root.textContent;
+      const occurrences = findQuoteOccurrences(full, comment.quote, comment.prefix || '', comment.suffix || '');
+      if (!occurrences.length) return null;
+      const start = occurrences[Math.min(comment.occurrence || 0, occurrences.length - 1)];
+      return rangeFromOffsets(root, start, start + comment.quote.length);
+    }
+    /** Wraps every text node (or the relevant slice of one) the range touches in
+     *  its own <mark> — NOT range.surroundContents(), which throws the moment the
+     *  range partially contains an element (crosses into, but not all the way
+     *  through, a <strong>/<code>/<a> — exactly the kind of selection a reader
+     *  drags across normal prose). One <mark> per fragment also means a
+     *  highlight that line-wraps gets a rounded background on each line
+     *  (box-decoration-break: clone in editor.css), not one box spanning the gap
+     *  between lines. */
+    function highlightRange(range, comment) {
+      const marks = [];
+      const wrapPortion = (node, start, end) => {
+        if (start >= end) return;
+        let target = node;
+        if (start > 0) target = target.splitText(start);
+        if (end - start < target.nodeValue.length) target.splitText(end - start);
+        const mark = document.createElement('mark');
+        mark.className = 'kb-text-comment-pin' + (comment.resolved ? ' kb-text-comment-pin--resolved' : '');
+        target.parentNode.insertBefore(mark, target);
+        mark.appendChild(target);
+        marks.push(mark);
+      };
+      if (range.startContainer === range.endContainer && range.startContainer.nodeType === Node.TEXT_NODE) {
+        wrapPortion(range.startContainer, range.startOffset, range.endOffset);
+        return marks;
+      }
+      const walker = document.createTreeWalker(range.commonAncestorContainer, NodeFilter.SHOW_TEXT, {
+        acceptNode: (n) => (range.intersectsNode(n) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT),
+      });
+      const nodes = [];
+      let n;
+      while ((n = walker.nextNode())) nodes.push(n);
+      for (const node of nodes) {
+        const start = node === range.startContainer ? range.startOffset : 0;
+        const end = node === range.endContainer ? range.endOffset : node.nodeValue.length;
+        wrapPortion(node, start, end);
+      }
+      return marks;
+    }
+    function isTextComment(c) { return c.kind === 'text' || (typeof c.quote === 'string' && c.quote); }
+    /** renderPreview() always hands this a fresh DOM (articlePreview.innerHTML
+     *  was just replaced), but refreshComments() calls this again on the SAME
+     *  DOM after e.g. resolving one comment — without unwrapping first, that
+     *  second pass would find its own already-highlighted text still sitting in
+     *  root.textContent and wrap a <mark> inside the previous <mark>. */
+    function unwrapTextHighlights() {
+      articlePreview.querySelectorAll('.kb-text-comment-pin').forEach((mark) => mark.replaceWith(...mark.childNodes));
+      articlePreview.normalize();   // re-merge the sibling text nodes the unwrap left behind
+    }
+    function renderTextHighlights() {
+      unwrapTextHighlights();
+      for (const c of comments) {
+        if (!isTextComment(c)) continue;
+        const range = locateTextComment(articlePreview, c);
+        if (!range) continue;   // the quote no longer appears in this render — nothing to draw
+        for (const mark of highlightRange(range, c)) {
+          // Deliberately NOT ev.stopPropagation() — same reasoning as the image
+          // pin's own click handler above: this click must still reach
+          // document's auto-close listener so it can consume
+          // suppressPopoverAutoClose (set below, before this event finishes
+          // bubbling) instead of leaving that flag stuck true for the NEXT
+          // unrelated click.
+          mark.addEventListener('click', () => openTextViewer(mark, c));
+        }
+      }
+    }
+    function truncateQuote(q) {
+      const s = String(q || '').replace(/\s+/g, ' ').trim();
+      return '“' + (s.length > 140 ? s.slice(0, 140).trimEnd() + '…' : s) + '”';
+    }
+    /** Fixed to the viewport, not the wrap: unlike an image pin, this comment
+     *  has no single containing box to be position:absolute inside of — the
+     *  quote can span a line wrap, or (highlightRange above) several elements.
+     *  Positioned off a live getBoundingClientRect() at open time instead of a
+     *  stored percentage, so it needs no resize handling of its own. */
+    function positionFloatPopover(pop, rect) {
+      const w = 220;   // matches .kb-comment-popover's own width
+      pop.style.left = Math.max(8, Math.min(rect.left, window.innerWidth - w - 8)) + 'px';
+      pop.style.top = (rect.bottom + 6) + 'px';
+    }
+    function openTextComposer(range) {
+      const anchor = anchorFromSelection(articlePreview, range);
+      if (!anchor) return;
+      closePopover();
+      suppressPopoverAutoClose = true;
+      const rect = range.getBoundingClientRect();
+      const pop = document.createElement('div');
+      pop.className = 'kb-comment-popover kb-comment-popover--float';
+      positionFloatPopover(pop, rect);
+      const quoteEl = document.createElement('p');
+      quoteEl.className = 'kb-comment-quote';
+      quoteEl.textContent = truncateQuote(anchor.quote);
+      const ta = document.createElement('textarea');
+      ta.placeholder = 'Comment on this text…';
+      const actions = document.createElement('div');
+      actions.className = 'kb-comment-popover-actions';
+      const cancelBtn = document.createElement('button');
+      cancelBtn.type = 'button'; cancelBtn.className = 'btn sm ghost'; cancelBtn.textContent = 'Cancel';
+      cancelBtn.addEventListener('click', closePopover);
+      const saveBtn = document.createElement('button');
+      saveBtn.type = 'button'; saveBtn.className = 'btn sm primary'; saveBtn.textContent = 'Pin';
+      saveBtn.addEventListener('click', async () => {
+        const text = ta.value.trim();
+        if (!text) return;
+        saveBtn.disabled = true;
+        try {
+          await callBg('comments_add', {
+            slug: selectedSlug, quote: anchor.quote, prefix: anchor.prefix, suffix: anchor.suffix,
+            occurrence: anchor.occurrence, text,
+          });
+          await refreshComments();
+          closePopover();
+        } catch (e) {
+          toast('Could not save comment: ' + e.message);
+          saveBtn.disabled = false;
+        }
+      });
+      actions.append(cancelBtn, saveBtn);
+      pop.append(quoteEl, ta, actions);
+      document.body.appendChild(pop);
+      activePopover = pop;
+      ta.focus();
+    }
+    function openTextViewer(markEl, comment) {
+      closePopover();
+      suppressPopoverAutoClose = true;
+      const rect = markEl.getBoundingClientRect();
+      const pop = document.createElement('div');
+      pop.className = 'kb-comment-popover kb-comment-popover--float';
+      positionFloatPopover(pop, rect);
+      const quoteEl = document.createElement('p');
+      quoteEl.className = 'kb-comment-quote';
+      quoteEl.textContent = truncateQuote(comment.quote);
+      const p = document.createElement('p');
+      p.textContent = comment.text;
+      const actions = document.createElement('div');
+      actions.className = 'kb-comment-popover-actions';
+      const delBtn = document.createElement('button');
+      delBtn.type = 'button'; delBtn.className = 'btn sm ghost'; delBtn.textContent = 'Delete';
+      delBtn.addEventListener('click', async () => {
+        if (!confirm('Delete this comment?')) return;
+        try { await callBg('comments_delete', { slug: selectedSlug, id: comment.id }); await refreshComments(); closePopover(); }
+        catch (e) { toast('Could not delete: ' + e.message); }
+      });
+      const resolveBtn = document.createElement('button');
+      resolveBtn.type = 'button'; resolveBtn.className = 'btn sm primary';
+      resolveBtn.textContent = comment.resolved ? 'Reopen' : 'Resolve';
+      resolveBtn.addEventListener('click', async () => {
+        try {
+          await callBg('comments_resolve', { slug: selectedSlug, id: comment.id, resolved: !comment.resolved });
+          await refreshComments();
+          closePopover();
+        } catch (e) { toast('Could not update: ' + e.message); }
+      });
+      actions.append(delBtn, resolveBtn);
+      pop.append(quoteEl, p);
+      if (comment.resolvedNote) {
+        const note = document.createElement('p');
+        note.className = 'kb-comment-resolved-note';
+        note.textContent = (comment.resolvedBy === 'agent' ? '🤖 ' : '✓ ') + comment.resolvedNote;
+        pop.append(note);
+      }
+      pop.append(actions);
+      document.body.appendChild(pop);
+      activePopover = pop;
+    }
+
+    // The "+ Comment" affordance that follows a text selection — mouseup rather
+    // than click/selectionchange because those fire mid-drag, before the
+    // selection is the one the user meant to keep. The Range is CLONED here and
+    // held onto rather than re-read from window.getSelection() when the button
+    // is later clicked: focusing the button can itself collapse the live
+    // selection, and by then it is too late to ask it what it was.
+    let commentAffordance = null;
+    let pendingTextRange = null;
+    function removeCommentAffordance() {
+      if (commentAffordance) { commentAffordance.remove(); commentAffordance = null; }
+      pendingTextRange = null;
+    }
+    function affordanceExcluded(node) {
+      const el = node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
+      // Images pin by click, not by selection (mount()'s own click-to-pin,
+      // above) — and the Live/PNG toggle bar's own label text is chrome, not
+      // article prose.
+      return !!(el && el.closest && el.closest('.kb-md-imgwrap, .kbs'));
+    }
+    articlePreview.addEventListener('mouseup', () => {
+      if (!commentMode) return;
+      removeCommentAffordance();
+      const sel = window.getSelection();
+      if (!sel || sel.isCollapsed || sel.rangeCount === 0) return;
+      const range = sel.getRangeAt(0);
+      if (!articlePreview.contains(range.commonAncestorContainer) || affordanceExcluded(range.commonAncestorContainer)) return;
+      if (!range.toString().trim()) return;
+      pendingTextRange = range.cloneRange();
+      const rect = range.getBoundingClientRect();
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'kb-text-comment-add';
+      btn.textContent = '💬 Comment';
+      btn.style.left = Math.max(8, Math.min(rect.right, window.innerWidth - 120)) + 'px';
+      btn.style.top = (rect.bottom + 6) + 'px';
+      btn.addEventListener('mousedown', (e) => e.preventDefault());   // don't steal the selection on the way to click
+      btn.addEventListener('click', () => {
+        const r = pendingTextRange;
+        removeCommentAffordance();
+        if (r) openTextComposer(r);
+      });
+      document.body.appendChild(btn);
+      commentAffordance = btn;
+      suppressPopoverAutoClose = true;
     });
 
     // ---- version history ----------------------------------------------------
@@ -1015,6 +1328,7 @@
      *  two view-switchers below don't each have to remember all of it. */
     function leaveArticle() {
       closePopover();
+      removeCommentAffordance();
       closeHistoryPanel();
       resetArticleState();
       selectedSlug = null;
@@ -1043,6 +1357,7 @@
     async function selectArticle(slug, title) {
       if (!confirmDiscard()) return;
       closePopover();
+      removeCommentAffordance();
       closeHistoryPanel();
       resetArticleState();
       selectedSlug = slug;
