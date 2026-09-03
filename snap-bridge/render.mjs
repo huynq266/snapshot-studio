@@ -75,17 +75,79 @@ async function withHiddenConsole(fn) {
   finally { childProcess.spawn = origSpawn; }
 }
 
+/** One Chromium shared across every render call in this process, instead of a
+ *  fresh launch() per call. renderSteps() already batches the STEPS of one
+ *  call into a single browser for exactly this reason (its own comment
+ *  above) — this extends the same idea across CALLS: server.js is long-lived
+ *  and calls renderSteps/renderGridOverlay repeatedly over a job's life (a
+ *  re-render per fix round, a grid overlay per snap_view({grid:true}), and
+ *  grid:true is now the playbook's recommended default for reading any
+ *  coordinate — not a rare fallback), and launch() is real wall-clock cost
+ *  paid again every time otherwise.
+ *
+ *  Lazy — nothing launches until the first render call — and guarded against
+ *  a launch race (two calls arriving before the first resolves share the one
+ *  in-flight promise, never two browsers) and a browser that died between
+ *  calls (isConnected() check; relaunches rather than failing forever).
+ *  Callers get their own page via browser.newPage() (already its own
+ *  BrowserContext under Playwright, so concurrent calls stay isolated) and
+ *  must close THEIR page, never this browser — see closeSharedBrowser(). */
+let sharedBrowserPromise = null;
+async function getSharedBrowser() {
+  if (sharedBrowserPromise) {
+    const browser = await sharedBrowserPromise;
+    if (browser.isConnected()) return browser;
+    sharedBrowserPromise = null;   // died between calls (crash, OOM) — relaunch below
+  }
+  sharedBrowserPromise = (async () => {
+    const pw = await import("playwright");
+    return withHiddenConsole(() => pw.chromium.launch());
+  })();
+  return sharedBrowserPromise;
+}
+
+/** The shutdown counterpart: nothing closes this browser per-call any more,
+ *  so a long-lived process (server.js) must close it explicitly on the way
+ *  out or it outlives the process as an orphaned chrome-headless-shell.exe —
+ *  exactly the class of leftover process this file already goes out of its
+ *  way to avoid (see withHiddenConsole's own note on the console window).
+ *  Safe to call when nothing was ever launched. */
+export async function closeSharedBrowser() {
+  if (!sharedBrowserPromise) return;
+  const p = sharedBrowserPromise;
+  sharedBrowserPromise = null;
+  try { const browser = await p; await browser.close(); } catch (e) {}
+}
+
+// server.js never had its own SIGINT/SIGTERM handling (nothing needed it —
+// every browser used to close itself per call), so the shared instance above
+// is the first thing in this process that can leak past a Ctrl+C. Wired up
+// here rather than in server.js since this module is the only thing that
+// knows the browser exists. A signal with a listener no longer terminates
+// the process on its own in Node, so the explicit exit() below is what
+// actually ends it — this replaces the previous default-terminate behavior
+// with the same outcome plus a graceful close in between, not a new one.
+let shuttingDown = false;
+async function shutdownAndExit(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  await closeSharedBrowser();
+  process.exit(signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 0);
+}
+process.on("SIGINT", () => shutdownAndExit("SIGINT"));
+process.on("SIGTERM", () => shutdownAndExit("SIGTERM"));
+
 export async function renderSteps(steps, opts = {}) {
   const scale = opts.scale || 2;
-  const pw = await import("playwright");
-  const browser = await withHiddenConsole(() => pw.chromium.launch());
+  const browser = await getSharedBrowser();
   const results = [];
   const pageErrors = [];
+  let page;
   try {
     // Viewport phải đủ lớn để #stage nằm trọn ở kích thước tự nhiên — nếu không
     // getBoundingClientRect() trả hộp bị viewport cắt và ta lại rơi đúng vào bẫy
     // của đường cũ. Đặt theo ảnh lớn nhất trong lô, cộng lề cho padding của stage.
-    const page = await browser.newPage({ viewport: { width: 800, height: 600 }, deviceScaleFactor: scale });
+    page = await browser.newPage({ viewport: { width: 800, height: 600 }, deviceScaleFactor: scale });
     page.on("pageerror", (e) => pageErrors.push(String(e && e.message || e)));
 
     // Gieo accent TRƯỚC khi script của trang chạy — accent-ramp.js đọc nó ngay
@@ -132,7 +194,7 @@ export async function renderSteps(steps, opts = {}) {
       results.push({ out: step.outAbs, width: Math.round(box.width * scale), height: Math.round(box.height * scale) });
     }
   } finally {
-    await browser.close();
+    if (page) await page.close();
   }
   if (pageErrors.length) console.error("[render] page errors:", pageErrors.join(" | "));
   return results;
@@ -149,10 +211,10 @@ export async function renderSteps(steps, opts = {}) {
  *
  *  Vẽ bằng chính trình duyệt đang render ảnh KB, không thêm thư viện ảnh nào. */
 export async function renderGridOverlay(srcAbs, size, gap) {
-  const pw = await import("playwright");
-  const browser = await withHiddenConsole(() => pw.chromium.launch());
+  const browser = await getSharedBrowser();
+  let page;
   try {
-    const page = await browser.newPage({ viewport: { width: Math.min(size.w, 4000), height: 600 }, deviceScaleFactor: 1 });
+    page = await browser.newPage({ viewport: { width: Math.min(size.w, 4000), height: 600 }, deviceScaleFactor: 1 });
     const dataUrl = "data:image/png;base64," + readFileSync(srcAbs).toString("base64");
     const w = size.w, h = size.h;
     // Nhãn to theo khung ảnh, cùng lý do với surface.js's uiScale(): 11px trên
@@ -181,7 +243,7 @@ export async function renderGridOverlay(srcAbs, size, gap) {
     const el = await page.$("#g");
     return await el.screenshot({ type: "png" });
   } finally {
-    await browser.close();
+    if (page) await page.close();
   }
 }
 
@@ -196,5 +258,6 @@ if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToP
   }));
   renderSteps(steps, { scale: spec.scale, accent: spec.accent })
     .then((r) => { for (const x of r) console.log(`  ✓ ${path.relative(KB, x.out)} — ${x.width}x${x.height}`); })
-    .catch((e) => { console.error("render failed:", e.message); process.exit(1); });
+    .catch((e) => { console.error("render failed:", e.message); process.exitCode = 1; })
+    .finally(() => closeSharedBrowser());   // one-shot CLI run — nothing else will ever close it
 }
