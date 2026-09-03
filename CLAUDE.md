@@ -54,10 +54,20 @@ those still rely on this rule being followed by hand.
 Work in place, on whatever branch the session already has checked out. Don't call
 `EnterWorktree`, don't run `git worktree add`, and don't run `orca worktree create` —
 and don't launch a subagent with `isolation: "worktree"` either. The one exception is
-an explicit request: the user types the word "worktree".
+an explicit request: the user types the word "worktree" — or a background-job harness
+refuses an edit until isolated, which is a technical guard, not a style choice, and has
+no workaround.
 
 **Why**: every worktree Claude Code makes lands in `.claude/worktrees/<name>` on a
 `worktree-*` branch cut from `origin/main`, and Orca shows those in its sidebar as
 separate workspaces (it classifies them `agent-scratch`, "created by an agent"). One
 per request turns the workspace list into noise, and each one is a branch someone has
 to remember to merge or delete later. Isolation the user didn't ask for isn't free.
+
+**When a worktree exists and the feature it holds is done, close the loop
+automatically — don't leave it dangling and don't ask first:** checkout `main`, verify
+(fetch and confirm `origin/main`/local `main` hasn't moved since the worktree branched
+off, so this is a clean fast-forward — if it isn't, stop and say so instead of merging),
+merge the worktree's branch into local `main`, then delete the worktree and its branch.
+**Don't push** as part of this — `origin/main` only moves when the user explicitly asks
+for a push.
