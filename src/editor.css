@@ -415,6 +415,10 @@ body.render .lab, body.render .library, body.render .kb, body.render .viewtabs {
    anymore) for a border-bottom against the blurb below, and scrolls its own
    overflow (inherited from .kb-rail) instead of the whole panel. */
 .kb-new-job-form { padding: var(--space-4) 14px; flex: 1; min-height: 0; border-right: none; border-bottom: 1px solid var(--line); }
+/* .btn.block's width: 100% made sense at the old 260px rail; stretched across
+   the now full-width form it reads as oversized, so these size to their own
+   label instead. */
+.kb-new-job-form .btn.block { width: auto; }
 /* Start button sits above the Instruction box, so it owns the gap under it
    (.btn.block's own margin-top would push it off the top of the form), and the
    heading below has to give back the 22px top margin it now inherits from
