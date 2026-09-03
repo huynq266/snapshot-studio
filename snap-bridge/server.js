@@ -585,13 +585,37 @@ function readCommentsFile(p) {
 function listKbComments(slug) {
   return { comments: readCommentsFile(commentsPath(slug)) };
 }
-function addKbComment(slug, { img, xNorm, yNorm, text }) {
-  if (!img || typeof xNorm !== "number" || typeof yNorm !== "number" || !text || !text.trim()) {
-    throw new Error("img, xNorm, yNorm, and non-empty text are required");
-  }
+/** Two anchor shapes share one comments.json, distinguished by `kind` (and, for
+ *  the older image records already on disk, by the mere presence of `img` —
+ *  they predate `kind` and are never rewritten just to add it):
+ *
+ *  - "image": {img, xNorm, yNorm} — a pin on a spot in a rendered image,
+ *    unchanged from before this comment picked up a second kind.
+ *  - "text": {quote, prefix, suffix, occurrence} — a highlighted run of the
+ *    article's own prose. `quote` is the exact selected text; `prefix`/`suffix`
+ *    are up to 30 characters of surrounding context, and `occurrence` is which
+ *    match to prefer when that context is not unique either (a repeated line
+ *    like "Click Save"). All four are matched back against the CURRENT render
+ *    every time the article redraws (src/bridge-kb.js's locateTextComment) —
+ *    there is no stored offset, so an edit elsewhere in the article cannot
+ *    silently point the highlight at the wrong sentence the way a raw
+ *    character index would. */
+function addKbComment(slug, { img, xNorm, yNorm, quote, prefix, suffix, occurrence, text }) {
+  if (!text || !text.trim()) throw new Error("non-empty text is required");
   const p = commentsPath(slug);
   const list = readCommentsFile(p);
-  const comment = { id: randomUUID(), img, xNorm, yNorm, text: text.trim(), resolved: false, createdAt: Date.now() };
+  let comment;
+  if (typeof quote === "string" && quote) {
+    comment = {
+      id: randomUUID(), kind: "text",
+      quote, prefix: prefix || "", suffix: suffix || "", occurrence: occurrence || 0,
+      text: text.trim(), resolved: false, createdAt: Date.now(),
+    };
+  } else if (img && typeof xNorm === "number" && typeof yNorm === "number") {
+    comment = { id: randomUUID(), kind: "image", img, xNorm, yNorm, text: text.trim(), resolved: false, createdAt: Date.now() };
+  } else {
+    throw new Error("img/xNorm/yNorm (an image pin) or quote (a text selection) is required, plus non-empty text");
+  }
   list.push(comment);
   ensureDirFor(p);
   writeFileSync(p, JSON.stringify(list, null, 2), "utf8");
@@ -696,15 +720,29 @@ function describeKbComments(slug, { includeResolved = false } = {}) {
   const all = readCommentsFile(commentsPath(slug));
 
   const comments = (includeResolved ? all : all.filter((c) => !c.resolved)).map((c) => {
+    const kind = c.kind === "text" ? "text" : "image";
     const out = {
       id: c.id,
+      kind,
       text: c.text,
       resolved: !!c.resolved,
       createdAt: new Date(c.createdAt).toISOString(),
-      img: c.img,
-      at: { xNorm: c.xNorm, yNorm: c.yNorm },
     };
     if (c.resolvedNote) out.resolvedNote = c.resolvedNote;
+
+    // A text-anchored comment has no image to resolve pixels against — it
+    // points at a quoted run of the article's own PROSE, fixed by editing the
+    // markdown (or, for a job-kind article, whatever generates it) near that
+    // quote, not by moving an el. Nothing below this belongs to that case.
+    if (kind === "text") {
+      out.quote = c.quote;
+      if (c.prefix) out.prefix = c.prefix;
+      if (c.suffix) out.suffix = c.suffix;
+      return out;
+    }
+
+    out.img = c.img;
+    out.at = { xNorm: c.xNorm, yNorm: c.yNorm };
 
     let imgAbs;
     try {
@@ -1240,7 +1278,7 @@ function buildMcpServer() {
   // side of the conversation, and an agent that can delete the feedback it
   // was given can make a correction disappear instead of acting on it.
   mcp.registerTool("snap_comments", {
-    description: "Read the review comments a human pinned on a KB article's images in KB Studio — this is how corrections to your annotation placement come back to you. Every pin is resolved to REAL PIXELS in the base capture's coordinate space (the same space snap_add's props and job.json's els use), together with the job step that owns the image and the existing annotations nearest the pin, so a comment like \"this arrow points at nothing\" comes with the element to fix. Omit slug to see which articles have feedback waiting. Then: read .claude/skills/kb/PLACEMENT_PLAYBOOK.md, edit that step's els in job.json, re-run snap_render_job, LOOK at the exported PNG, and call snap_comment_resolve.",
+    description: "Read the review comments a human pinned on a KB article in KB Studio — this is how corrections come back to you. Each has a \"kind\": an \"image\" pin is resolved to REAL PIXELS in the base capture's coordinate space (the same space snap_add's props and job.json's els use), together with the job step that owns the image and the existing annotations nearest the pin, so a comment like \"this arrow points at nothing\" comes with the element to fix — for these, read .claude/skills/kb/PLACEMENT_PLAYBOOK.md, edit that step's els in job.json, re-run snap_render_job, LOOK at the exported PNG, then call snap_comment_resolve. A \"text\" comment instead carries `quote` (the exact prose it is highlighting, plus a little `prefix`/`suffix` context) — it is feedback on what the article SAYS, not where something is drawn; fix it by editing the article's own words at that quote (snap_write_kb for a flat article; for a job-kind one the markdown is generated, so change job.json/the step heading instead) and resolve the same way. Omit slug to see which articles have feedback waiting.",
     inputSchema: {
       slug: z.string().optional().describe("Article slug — \"my-feature\" for kb/my-feature.md or kb/my-feature/. Omit to list every article that has comments."),
       includeResolved: z.boolean().optional().describe("Include comments that are already resolved. Default false — open feedback only."),

@@ -1011,7 +1011,7 @@ function buildReviseSystemPrompt() {
     "If the fix genuinely needs a new screenshot — the app changed, the target was never in frame, the state in the image is wrong (PLACEMENT_PLAYBOOK #2) — STOP and say so plainly, naming the step and what has to be captured. The user then starts a capture job from \"+ New job\" with the right tabs open. Do NOT paper over it by moving an annotation onto something that is not in the image.",
     "",
     "Your tools, and the loop they make:",
-    "- snap_comments — the pins the user placed on the images, already resolved to real pixels in the base capture's coordinate space, with the owning step and the nearest elements.",
+    "- snap_comments — what the user pinned, each with a \"kind\". \"image\" pins are already resolved to real pixels in the base capture's coordinate space, with the owning step and the nearest elements. \"text\" pins carry a `quote` instead (plus a little prefix/suffix context) — that is feedback on the article's PROSE, not on a drawn element: fix the wording at that quote (job.json/the step heading if this is a job-kind article, since its markdown is generated — see snap_write_kb below — otherwise the markdown directly) rather than touching els.",
     "- snap_job — read the article's job.json, change a step's els, write the whole object back.",
     "- snap_render_job — re-render every image AND the markdown from job.json. Seconds, no browser.",
     "- snap_open / snap_kit / snap_add / snap_export — annotate a capture directly, for an article with no job.json. snap_add's \"at\" mode reads a live tab and is denied here: pass explicit x/y props instead, which is exactly what snap_comments hands you.",
@@ -1044,7 +1044,7 @@ function buildRevisePrompt(instruction, ctx, isFollowUp) {
     const pins = (ctx.comments && ctx.comments.comments) || [];
     if (pins.length) {
       parts.push(
-        `Open pinned comments (${pins.length}) — coordinates are already in the base capture's pixel space. Re-read them any time with snap_comments:`,
+        `Open pinned comments (${pins.length}) — "image" ones already carry pixel coordinates in the base capture's space, "text" ones carry the quoted prose instead. Re-read them any time with snap_comments:`,
         "",
         "```json",
         JSON.stringify(pins, null, 2),
