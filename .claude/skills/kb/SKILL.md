@@ -188,6 +188,23 @@ không cần capture lại.
 > định**, không phải màu người dùng chọn. Kiểm tra extension còn nối không (`snap_status`) rồi
 > chạy lại, đừng giao bộ ảnh sai màu.
 
+### 7b. Icon trong prose — cho phép, nhưng hạn chế
+
+Mặc định Claude Code không tự thêm emoji trừ khi được yêu cầu; bài KB là một ngoại lệ đã được
+yêu cầu, với giới hạn — icon là gia vị cho callout, không phải trang trí:
+
+- Chỉ dùng để đánh dấu **callout** (Lưu ý / Cảnh báo / Mẹo) hoặc một bước có rủi ro thật (ví dụ
+  dữ liệu mất nếu bấm nhầm) — không thêm icon vào heading, bullet thường, hay câu mở đầu/kết.
+- Tối đa **một** icon mỗi callout, đặt ngay đầu dòng trước chữ đậm (`⚠️ **Cảnh báo:**`,
+  `💡 **Mẹo:**`) — không rải nhiều icon trong cùng một đoạn hay lặp icon ở mọi bước của bài.
+- Không dùng icon thay cho tên nút/menu thật (đừng viết "bấm 🗑️" — nói rõ "bấm **Discard**"),
+  và không dùng icon để đánh số bước — `step`/`label` component đã làm việc đó trên ảnh rồi.
+- `notes[].kind` (mục 7, `kb-notes.js`) là nhãn thuần chữ — đừng nhét icon vào `kind`; icon (nếu
+  có) đặt ở đầu `text`.
+- Stage **review**: icon vượt quá mức trên (trang trí, lặp lại, thay cho tên nút thật) là một
+  finding hợp lệ, `owner: "write"`, `severity: "nit"` — không phải `blocker` trừ khi nó khiến
+  hướng dẫn hiểu sai.
+
 ### 8. Dọn dẹp — bắt buộc nếu đã click vào app thật
 Nếu trong quá trình làm có click đổi state (radio, checkbox, form): **khôi phục lại**. Bấm
 Discard của app, hoặc chọn lại giá trị cũ. **Không để lại "Unsaved changes" trên store thật
