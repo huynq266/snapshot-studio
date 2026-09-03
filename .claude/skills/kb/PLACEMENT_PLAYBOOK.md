@@ -258,7 +258,16 @@ người dùng, đừng tự quyết là "chắc không sao".
 
 **Dùng `job.globalEls`, không blur từng bước.** PII của một app luôn nằm **cùng một chỗ trên
 mọi ảnh** — chip tài khoản góc phải trên, tên cửa hàng ở header. Đặt các `blur` đó **một lần**
-vào `globalEls` ở cấp job:
+vào `globalEls` ở cấp job.
+
+**Target là một element thật, chọn được selector → dùng `at`, đừng gõ tay.** `blur` nhận `at`
+y hệt `highlight`/`spotlight` (`kit-geometry.js` đọc box thật của element + `pad`), nên chip tài
+khoản/tên cửa hàng nên được neo bằng `snap_add({ type:"blur", at:{selector, tabId, pad:8} })`
+rồi chép `props` nó tính ra vào `globalEls` — box đo được, không phải box đoán. Vì đây là
+`globalEls`, đoán sai là sai **trên mọi ảnh cùng lúc**, nên đây là chỗ ít nên gõ tay nhất trong
+cả bài, không phải chỗ ít quan trọng nhất. Chỉ gõ tay `x/y/w/h` khi target không có selector ổn
+định (che theo một vùng ảnh chứ không theo một element) — khi đó bắt buộc `snap_view({grid:true})`
+để đọc số (PRINCIPLE #7), và kiểm tra ngay ảnh **đầu tiên** được render chứ đừng đợi tới ảnh cuối:
 
 ```json
 { "title": "...", "slug": "...",
@@ -280,6 +289,11 @@ Ngoại lệ: PII chỉ xuất hiện ở một ảnh (tên khách trong một �
 > **LEARNING 2026-09-01** — cùng một lỗi, quy mô lớn hơn: `multibuy-mix-match-combo` blur
 > `huynq-vl` ở bước 1 và **để lộ ở 10 bước còn lại**. Không phải quên nguyên tắc — mà là nguyên
 > tắc đòi lặp lại một thao tác thủ công 11 lần. Đó là lý do `globalEls` tồn tại.
+>
+> **LEARNING 2026-09-03** (`L-2026-09-03-a`) — lần thứ ba, dạng khác: `volume-discount-translations`
+> **có** đặt `globalEls` đúng cách, box vẫn **sai** — gõ tay x/y/w/h chỉ trúng mép phải của chip,
+> initials vẫn lộ rõ trên cả 5 ảnh. Không phải quên luật, mà là đoán toạ độ cho đúng một element
+> thật thay vì đo nó — xem đoạn `at` ngay trên, đây là lý do quy tắc đó được thêm vào.
 
 ### 7. Đọc toạ độ bằng lưới, đừng ước lượng bằng mắt. (hard rule)
 
