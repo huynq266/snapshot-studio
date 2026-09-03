@@ -45,6 +45,7 @@
     const uploadBtn = $('#kbUploadBtn');
     const mdInput = $('#kbMdInput');
     const filenameEl = $('#kbFilename');
+    const refDocPromptBtn = $('#kbRefDocPromptBtn');
     const sessionInList = $('#kbSessionInList');
     const sessionCandidateList = $('#kbSessionCandidateList');
     const sessionRefreshBtn = $('#kbSessionRefresh');
@@ -1541,9 +1542,43 @@
       updateControls();
     }
 
+    // The canned ask sent to the DEV TEAM's own Claude Code session, in the
+    // app's own repo — not this one. It has the source; the KB writer only
+    // has screenshots, so this is how a control's exact name/behavior gets
+    // into the write and review stages without either reading live DOM (the
+    // skill's "Không làm" forbids that — it risks pulling PII into the
+    // article; a reference doc doesn't). Framed the same way kb-job.js
+    // itself frames the attached .md to the write/review stages: background,
+    // not the source of truth — see buildPrompt()/runReviewStage() there.
+    function buildRefDocPrompt(instruction) {
+      const feature = instruction || '[describe the feature or screen this KB article is about]';
+      return [
+        'A teammate is writing a Knowledge Base (help-center) article about a feature in this app, working only from screenshots — they cannot read this repo.',
+        '',
+        'Feature/area the article is about:',
+        feature,
+        '',
+        'Please write a short reference document (Markdown, no code) that:',
+        '- Lists every screen/route involved, in the order a user reaches them.',
+        '- For each interactive control on those screens (button, toggle, dropdown, field, menu item): its exact visible label, what it does, its default state, and any permission/plan/role gate that hides or disables it.',
+        '- Flags anything a screenshot alone would get wrong or leave ambiguous — icon-only controls, a setting whose name is not visible in the UI, states that look identical but are not.',
+        '- Notes any destructive or hard-to-reverse action among them, so the article can warn readers.',
+        '- Skips implementation details — no code, no internal/variable names, no file paths. This is for someone writing user-facing help text, not another engineer.',
+        '',
+        'Keep it to bullet points. Save it as a .md file and send it back — it gets attached to the article as background reference, not pasted in verbatim.',
+      ].join('\n');
+    }
+
     // ---- wiring -----------------------------------------------------------
     instructionInput.addEventListener('input', updateControls);
     uploadBtn.addEventListener('click', () => mdInput.click());
+    refDocPromptBtn.addEventListener('click', () => {
+      const prompt = buildRefDocPrompt(instructionInput.value.trim());
+      navigator.clipboard.writeText(prompt).then(
+        () => toast('Prompt copied — paste it into a Claude Code session in the app’s repo.'),
+        () => toast('Could not copy.')
+      );
+    });
     mdInput.addEventListener('change', () => {
       const f = mdInput.files[0];
       mdInput.value = '';
