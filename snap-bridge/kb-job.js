@@ -1,27 +1,29 @@
 /* kb-job.js — spawns a Claude Agent SDK session that reads a user
-   instruction (with an optional reference .md attached), drives Chrome
-   Bridge + this process's own mcp__snap__* tools, and writes the final KB
-   article via snap_write_kb or snap_render_job. This is topology B: the spawned session is
-   just a second MCP client hitting the same /mcp endpoint topology A
-   already proved works — see KB-BRIDGE.md mục 7 for the original design
-   writeup, and the "instruction + session tabs" and "agent opens its own
-   tab" entries (both dated 2026-08-28) for how it evolved since.
+   instruction (with an optional reference .md attached), drives the
+   browser through this process's own mcp__snap__* tools ONLY, and writes
+   the final KB article via snap_write_kb or snap_render_job. This is
+   topology B: the spawned session is just a second MCP client hitting the
+   same /mcp endpoint topology A already proved works — see KB-BRIDGE.md
+   mục 7 for the original design writeup.
 
-   The job DOES work on the tabs the user put in its session, but it has to
-   earn them first. Chrome Bridge refuses any tab outside the group it hands
-   the session, and at the moment the user presses Start that group does not
-   exist yet — which is what the 2026-08-28 entry in KB-BRIDGE.md read as
-   structurally impossible before giving up and pointing the job at a tab of
-   its own. What was missing there was timing, not an API. The job navigates
-   once, which is what materialises the group; snap-bridge then calls the
-   extension's adopt_tabs with that tab's id and the session's tabs are moved
-   into it (src/bridge-worker.js has the mechanism, and why it records where
-   each tab came from). From there the job drives the user's REAL tab — scroll
-   position, open panel, half-filled form and all — instead of a fresh copy of
-   the URL that lost every bit of that and made the instruction describe it
-   again. Adoption can still miss a tab (pinned, or closed since Start); that
-   tab falls back to the old path of navigating to its URL, so both routes
-   stay live. Navigation is scoped to the origin(s) of the tab(s) the user
+   The job works DIRECTLY on the tabs the user put in its session, by their
+   real tabId, from its very first tool call — no throwaway tab, no tab
+   group, no adoption. That used to require earning: Chrome Bridge refused
+   any tab outside the group it handed the session, so the job navigated a
+   throwaway tab first (to materialise that group), then had snap-bridge
+   call the extension's adopt_tabs to move the session's tabs into it. That
+   whole dance existed to work around Chrome Bridge's own scoping — the
+   mcp__snap__* tools it works around are NOT scoped by any tab group (they
+   call chrome.tabs.* directly), so once Chrome Bridge was dropped from this
+   stage the dance had nothing left to do. See CHROME-BRIDGE-EXIT-PLAN.md
+   for the full history and the reasoning (mục 2.2 especially).
+
+   The real tradeoff from dropping it: this job has NO way to open a new
+   browser tab any more. If a session tab is closed or otherwise unusable,
+   there is no throwaway-tab fallback to fall back to — the job stops and
+   reports which tab needs to be reopened and re-added, same as it already
+   does when a task needs an origin outside its session. Navigation
+   (snap_navigate) is still scoped to the origin(s) of the tab(s) the user
    added — see canUseTool below.
 
    One job at a time (module-level state, not a Map) — starting a second
@@ -46,7 +48,6 @@ import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadChromeBridgeConfig } from "./chrome-bridge-config.js";
 import { readReview, findingsFor, summarizeReview } from "./kb-review.js";
 import { writeJobLog } from "./kb-log.js";
 import { promptText } from "./kb-playbook.js";
@@ -58,38 +59,17 @@ import { promptText } from "./kb-playbook.js";
 // filesystem tool anyway, but correct is still cheap.
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
-// mcp__chrome__* tools safe to pre-approve for an unattended session driving
-// the user's real logged-in browser. Excluded, deliberately, with reasons —
-// see KB-BRIDGE.md mục 7: javascript_eval (arbitrary code exec — can read
-// secrets a screenshot never shows), read_network_requests/
-// read_console_messages (can surface secrets/PII that never render),
-// get_page_text/read_page (pull raw page text — including PII — straight
-// into the model's context with no redaction step, unlike a screenshot
-// which can still be blurred), upload_file (unattended file submission to a
-// third-party form is its own risk class).
-//
-// mcp__chrome__new_tab is ALSO excluded — not for a safety reason, but a
-// workflow one: this job always opens its page(s) via navigate (see below),
-// which already opens a tab in its own group when none exists yet, so
-// new_tab is redundant and denying it keeps the job to one predictable tab.
-const CHROME_SAFE_TOOLS = new Set([
-  "mcp__chrome__navigate", "mcp__chrome__click", "mcp__chrome__fill", "mcp__chrome__fill_form",
-  "mcp__chrome__type_text", "mcp__chrome__press_key", "mcp__chrome__scroll", "mcp__chrome__find", "mcp__chrome__wait_for",
-  "mcp__chrome__list_tabs", "mcp__chrome__switch_tab", "mcp__chrome__close_tab",
-  "mcp__chrome__resize_window", "mcp__chrome__take_screenshot", "mcp__chrome__chrome_status",
-]);
 // mcp__snap__* tools that take a tabId — Snap Studio's own tools, called
 // straight against the real chrome.tabs.* APIs in background.js, so unlike
-// mcp__chrome__* they are NOT scoped by Chrome Bridge's own tab-group
-// boundary. runCaptureStage() gates them against this job's own tabs instead:
-// the one Chrome Bridge handed back from its navigate call (tracked off the
-// tool_result stream, since canUseTool only sees call INPUTS, never outputs)
-// plus whichever session tabs adoption managed to move into the group.
-// snap_add is handled separately below since it only carries a tabId when its
-// optional "at" mode is used.
+// the old mcp__chrome__* tools they are NOT scoped by any tab-group
+// boundary. runCaptureStage() gates them against this job's own sessionTabs
+// instead — a plain id whitelist, no group to wait on. snap_add is handled
+// separately below since it only carries a tabId when its optional "at"
+// mode is used.
 const SNAP_TAB_TOOLS = new Set([
-  "mcp__snap__snap_capture_tab", "mcp__snap__snap_frame_list", "mcp__snap__snap_frame_scroll",
-  "mcp__snap__snap_frame_find", "mcp__snap__snap_frame_click",
+  "mcp__snap__snap_capture_tab", "mcp__snap__snap_navigate", "mcp__snap__snap_look",
+  "mcp__snap__snap_frame_list", "mcp__snap__snap_frame_scroll", "mcp__snap__snap_frame_find",
+  "mcp__snap__snap_frame_click", "mcp__snap__snap_frame_fill", "mcp__snap__snap_frame_press",
 ]);
 
 /* The authoring guidance — how to plan steps, place annotations, verify the
@@ -147,27 +127,25 @@ function originsOf(sessionTabs) {
 function buildSystemPrompt(sessionTabs, origins) {
   const originList = [...origins];
   return [
-    `HOW YOU REACH THE USER'S PAGES — read this before doing anything else. The tabs the user added to this job are listed further down with their real tab ids, and you get to work in them directly. They are not reachable yet, though: Chrome Bridge only lets this session touch tabs in its own tab group, and that group does not exist until you open something.`,
+    `HOW YOU REACH THE USER'S PAGES — read this before doing anything else. The tabs the user added to this job are listed further down with their real tab ids — already open in their own browser, already logged in, still on whatever screen they left them on. You work in them DIRECTLY, by tabId, from your very first tool call. There is no throwaway tab to open first and nothing to adopt.`,
     "",
-    `So your FIRST call is mcp__chrome__navigate WITHOUT a tabId. That opens a throwaway tab, which is what brings the group into being; the session's tabs are then moved in for you and that throwaway tab is closed again. From that point pass one of the session tab ids below to any tool that takes a tabId and you are driving the user's own tab — whatever they had scrolled to, opened or typed before starting this job is still on screen, which is usually the exact state the article needs to show.`,
+    `snap_navigate({tabId, url}) moves one of these tabs to a different URL when a step needs a new screen. snap_frame_list / snap_frame_scroll / snap_frame_find / snap_frame_click / snap_frame_fill / snap_frame_press drive what's on screen, including inside a cross-origin iframe. snap_look peeks at a tab right now without saving anything; snap_capture_tab is the shot that actually goes into the article.`,
     "",
-    `If a call on a session tab is refused, or the log told you a tab could not be taken over, fall back to what this job used to do: navigate your own tab to that page's URL and work there. Same browser profile either way, so you are logged in — you just have to reach the right screen yourself.`,
+    `EVERY one of those tools REQUIRES an explicit tabId — there is no "current tab" to fall back to, on purpose. Name the tab you mean, every single call.`,
     "",
-    `ALWAYS name a tabId, on mcp__chrome__* calls too, not just the mcp__snap__* ones that require it. After that first navigate there is no tab of your own left to default to, so a call without a tabId lands on whichever of the user's tabs Chrome Bridge picks — and navigating THAT tab throws away the very state you were given it for. Name the tab you mean, every time.`,
+    `This job has NO way to open a new browser tab. If a tab in the list below has been closed or otherwise cannot be reached, STOP and say plainly which tab needs to be reopened and added to the session — do not try to work around it.`,
     "",
-    `mcp__chrome__new_tab is denied — always use navigate instead, even for the very first page.`,
-    "",
-    `Navigate only within these origin(s), inferred from the tab(s) the user added to this job's session — anywhere else is denied. If the task needs a page outside them, STOP and report exactly which page/origin the user should add instead of trying to work around it:`,
+    `Navigate (snap_navigate) only within these origin(s), inferred from the tab(s) the user added to this job's session — anywhere else is denied. If the task needs a page outside them, STOP and report exactly which page/origin the user should add instead of trying to work around it:`,
     originList.map((o) => `- ${o}`).join("\n"),
     "",
-    "The tab(s) the user put in this job's session (tab id — title — url) — after your first navigate these are yours to use by id, still on the screen the user left them on:",
+    "The tab(s) the user put in this job's session (tab id — title — url) — yours to use by id from the start, still on the screen the user left them on:",
     formatSessionTabs(sessionTabs),
     "",
     "You are building one Knowledge Base article from a user instruction, unattended — you may also be given a reference document (background only; the instruction is the actual task). The two documents below are this project's own KB authoring skill and its annotation placement playbook — follow them as your instructions, including the visual verification step (read every exported PNG back and check it) and the cleanup step (restore any app state you changed).",
     "",
     readSkillFiles(),
     "",
-    `Reminder — allowed origin(s) for navigate: ${originList.join(", ")}. One tabId-less navigate to start, then a tabId on every single call after it.`,
+    `Reminder — allowed origin(s) for snap_navigate: ${originList.join(", ")}. A tabId on every single call, no exceptions.`,
   ].join("\n");
 }
 
@@ -188,7 +166,7 @@ function buildPrompt(instruction, markdown, sessionTabs) {
     "",
     instruction,
     "",
-    "Page(s) to start from (tab id — title — url). Navigate once to open this job's own tab; from then on these tab ids are the user's own tabs, left exactly as they had them:",
+    "Page(s) to start from (tab id — title — url) — already yours to use by id, left exactly as the user had them:",
     formatSessionTabs(sessionTabs),
     "",
     "Build the article now."
@@ -239,9 +217,10 @@ export function noteJobSlug(slug) {
 /** Starts a KB job. onProgress(line) is called for every log line pushed —
  *  the caller (server.js's /ext handler, or a standalone test trigger)
  *  decides what to do with it. Throws synchronously if a job is already
- *  running or Chrome Bridge cannot be found — both are caller-visible
- *  errors, not job-state errors, since no job object exists yet. */
-export function startJob({ mode, slug, context, instruction, markdown, mdFilename, sessionTabs, tabs, onProgress, snapSelf }) {
+ *  running or the arguments are unusable (no instruction, an author job with
+ *  no session tabs) — caller-visible errors, not job-state errors, since no
+ *  job object exists yet. */
+export function startJob({ mode, slug, context, instruction, markdown, mdFilename, sessionTabs, onProgress, snapSelf }) {
   if (currentJob && currentJob.status === "running") {
     throw new Error("a KB job is already running — wait for it to finish or cancel it first.");
   }
@@ -249,8 +228,8 @@ export function startJob({ mode, slug, context, instruction, markdown, mdFilenam
 
   // Two job kinds, and the checks differ because the JOBS differ, not for
   // convenience: a revise job never opens a browser, so requiring session
-  // tabs and a working Chrome Bridge would block the one kind of job that
-  // does not need either. See the revise-mode block at the bottom of this file.
+  // tabs would block the one kind of job that does not need any. See the
+  // revise-mode block at the bottom of this file.
   const revise = mode === "revise";
   if (revise) {
     if (!slug || typeof slug !== "string") throw new Error("a revise job needs the slug of the article it is revising.");
@@ -261,8 +240,6 @@ export function startJob({ mode, slug, context, instruction, markdown, mdFilenam
     }
   }
 
-  const chromeCfg = revise ? null : loadChromeBridgeConfig();
-  if (chromeCfg && !chromeCfg.ok) throw new Error(`Cannot start a KB job: ${chromeCfg.reason}`);
   if (!snapSelf || !snapSelf.url || !snapSelf.token) throw new Error("snapSelf {url, token} is required — the bridge's own MCP endpoint for the spawned session to call.");
 
   const id = randomUUID();
@@ -289,8 +266,8 @@ export function startJob({ mode, slug, context, instruction, markdown, mdFilenam
 
   const run = revise
     ? runReviseJob(job, instruction, snapSelf, push)
-    : runAuthorPipeline(job, instruction, markdown, sessionTabs, chromeCfg, snapSelf, push, tabs);
-  const settled = run.catch((e) => {
+    : runAuthorPipeline(job, instruction, markdown, sessionTabs, snapSelf, push);
+  run.catch((e) => {
     job.status = "error";
     job.error = String((e && e.message) || e);
     job.endedAt = Date.now();
@@ -304,19 +281,6 @@ export function startJob({ mode, slug, context, instruction, markdown, mdFilenam
     // reading back are not the tidy ones. See kb-log.js.
     writeJobLog(job);
   });
-
-  // However the job ends, the user's tabs go back where they came from. Not
-  // tidiness: adoption physically moved them into Chrome Bridge's tab group,
-  // and Chrome Bridge tears that group down when the session ends — a tab left
-  // in it can go with it, and closing someone's logged-in tab is a far worse
-  // failure than anything this feature buys. A cancel lands here too, since
-  // cancelJob() only asks the stream to stop and this promise still settles.
-  if (!revise && tabs && typeof tabs.release === "function") {
-    settled.then(() => tabs.release()).then(
-      (r) => { if (r && r.released && r.released.length) push(`Put ${r.released.length} tab(s) back where they were.`); },
-      (e) => push(`Could not put the session tab(s) back: ${String((e && e.message) || e)} — they are still in this job's tab group in Chrome.`)
-    );
-  }
 
   return { id };
 }
@@ -404,7 +368,7 @@ const CAPTURE_ROLE = [
   "- Follow the skill's steps 2 -> 6b for every step, including looking at every exported PNG (snap_view) and writing job.json after EACH step rather than at the end.",
   "- snap_write_kb is denied to you: the markdown is assembled by the write stage, from job.json.",
   "",
-  "On a FIX ROUND you are resumed with the review's findings routed to you. You own the whole visual layer, so both kinds are yours: moving, retyping or removing an annotation (job.json, no browser needed) and re-shooting a capture — for that, navigate again first: this round is a new browser session, so the tab from your previous round is gone and the session tabs only come back within reach once you have.",
+  "On a FIX ROUND you are resumed with the review's findings routed to you. You own the whole visual layer, so both kinds are yours: moving, retyping or removing an annotation (job.json, no browser needed) and re-shooting a capture — the session tabs are still yours by the same tabId as last round, so just call snap_navigate/snap_capture_tab again directly, no re-establishing needed.",
   "ALWAYS finish a fix round with snap_render_job so the exported PNGs match the job.json you just changed, then snap_view to look at what you actually produced. The reviewer reads those PNGs, not your job.json: an annotation moved in the file and not re-rendered comes straight back to you as the same finding, and you will have no way to tell that is what happened.",
   "Fix what is filed; if a finding is wrong, say so plainly rather than making a change you do not believe in.",
 ].join("\n");
@@ -466,7 +430,7 @@ function fixPrompt(review, findings, slug) {
  *  stage can pass the first and fail the second: snap_job succeeding is not the
  *  same fact as kb/<slug>/job.json existing with steps in it. Where the file is
  *  the deliverable, check the file. */
-async function runStage(job, push, { name, round, systemPrompt, prompt, mcpServers, canUseTool, requireAnyOf, requireAfter, onTabId }) {
+async function runStage(job, push, { name, round, systemPrompt, prompt, mcpServers, canUseTool, requireAnyOf, requireAfter }) {
   job.stage = name;
   job.round = round;
   push(round
@@ -498,7 +462,6 @@ async function runStage(job, push, { name, round, systemPrompt, prompt, mcpServe
     });
     job._query = q;
     return consumeStream(q, job, push, {
-      onTabId,
       onSessionId: (id) => { job._sessions[name] = id; },
     });
   };
@@ -535,114 +498,55 @@ function snapServer(snapSelf) {
 /* ---- stage 1: capture -------------------------------------------------- */
 
 async function runCaptureStage(job, ctx, push, findings, round) {
-  const { sessionTabs, allowedOrigins, chromeCfg, snapSelf } = ctx;
-  // The tab Chrome Bridge opened for this job, learned from its own navigate
-  // tool_results as they stream past (see consumeStream) — canUseTool sees call
-  // INPUTS, never outputs, so it cannot discover that id on its own.
-  let jobTabId = null;
-  // The user's own tabs, once they have been moved into this job's tab group.
-  // Both are reset per round on purpose: a resumed conversation does NOT get
-  // its old tab back, and each round is a new Chrome Bridge session with a new
-  // group, so last round's adoption does not carry over either — the next
-  // navigate starts it again and the extension moves the tabs across.
-  const adoptedTabIds = new Set();
-  // Set once the extension has closed the job's own tab, which it does as soon
-  // as it has somewhere better to work — see cmdAdoptTabs. After that jobTabId
-  // is only a record that navigating happened, not a tab anyone may name.
-  let jobTabClosed = false;
-  let adoptPromise = null;
-
-  /** Hand the session's tabs to this job, now that navigating has given Chrome
-   *  Bridge a group to put them in. Never rejects: adoption is an upgrade over
-   *  navigating to the URL, not a precondition for it, so a failure is logged
-   *  in the words the agent needs ("go to the URL instead") and the job carries
-   *  on down the old path. */
-  function startAdoption(id) {
-    if (!ctx.tabs || typeof ctx.tabs.adopt !== "function") return;
-    adoptPromise = ctx.tabs.adopt(id, sessionTabs.map((t) => t.id)).then(
-      (r) => {
-        for (const t of (r && r.adopted) || []) adoptedTabIds.add(t.id);
-        if (r && r.jobTabClosed) jobTabClosed = true;
-        if (adoptedTabIds.size) push(`Working in the user's own tab(s) ${[...adoptedTabIds].join(", ")} — whatever they left on screen is still there${jobTabClosed ? ", and this job's own tab has been closed again" : ""}.`);
-        for (const s of (r && r.skipped) || []) push(`Tab ${s.id} stays out of reach (${s.reason}) — its URL has to be navigated to instead.`);
-        return r;
-      },
-      (e) => {
-        push(`Could not take over the session tab(s): ${String((e && e.message) || e)} — navigating to their URLs instead.`);
-        return null;
-      }
-    );
-  }
+  const { sessionTabs, allowedOrigins, snapSelf } = ctx;
+  // The whitelist itself — no group, no adoption, no "job's own tab": a
+  // session tab's real tabId is usable from the very first call. See the
+  // file header and CHROME-BRIDGE-EXIT-PLAN.md mục 2.2/7 for why this
+  // replaced the old adopt dance.
+  const sessionTabIds = new Set(sessionTabs.map((t) => t.id));
 
   function originAllowed(url) {
     try { return allowedOrigins.has(new URL(url).origin); } catch { return false; }
   }
 
   async function canUseTool(toolName, input) {
-    if (toolName === "mcp__chrome__new_tab") {
-      push("Denied — opening a second browser tab; this job navigates the one it already has.");
-      return { behavior: "deny", message: "Do not open new tabs directly. Call mcp__chrome__navigate without a tabId instead — it opens (or reuses) this job's own tab and returns its tabId." };
+    if (!toolName.startsWith("mcp__snap__")) {
+      push(`Denied — ${doing(toolName, input)}: not something this job may do.`);
+      return { behavior: "deny", message: `Tool "${toolName}" is not permitted for this unattended KB job.` };
     }
-    if (toolName === "mcp__chrome__navigate") {
-      if (input && typeof input.url === "string" && input.url && !originAllowed(input.url)) {
-        push(`Denied — going to ${shortUrl(input.url)}, which is outside the site(s) this job was given.`);
-        return { behavior: "deny", message: `Navigating to "${input.url}" is not allowed — this job is scoped to: ${[...allowedOrigins].join(", ")}. Stay within these, or stop and report if a different origin needs to be added to the session.` };
-      }
-      return { behavior: "allow" };
+    // The prose belongs to the write stage. Denying it here rather than asking
+    // for it in the prompt is what stops a capture agent from "finishing the
+    // job" with an article the writer then has to unpick.
+    if (toolName === "mcp__snap__snap_write_kb") {
+      push("Denied — writing the article text; that is the write stage's job.");
+      return { behavior: "deny", message: "snap_write_kb belongs to the write stage. Put the step in job.json with snap_job; the article's markdown is rendered from it later." };
     }
-    if (CHROME_SAFE_TOOLS.has(toolName)) {
-      // Still scoped by Chrome Bridge's own tab-group boundary, which adoption
-      // has turned into exactly the right boundary: the session's tabs are now
-      // INSIDE that group, so "a tab this session may touch" and "a tab the user
-      // added" have become the same set. All that is left to do here is wait, so
-      // that a call naming a session tab is not refused a beat before adoption
-      // makes it valid.
-      if (adoptPromise && input && input.tabId != null) await adoptPromise;
-      return { behavior: "allow" };
+    if (toolName === "mcp__snap__snap_findings") {
+      return { behavior: "deny", message: "snap_findings belongs to the review stage — it is how findings come TO you, not something you file." };
     }
-    if (toolName.startsWith("mcp__snap__")) {
-      // The prose belongs to the write stage. Denying it here rather than asking
-      // for it in the prompt is what stops a capture agent from "finishing the
-      // job" with an article the writer then has to unpick.
-      if (toolName === "mcp__snap__snap_write_kb") {
-        push("Denied — writing the article text; that is the write stage's job.");
-        return { behavior: "deny", message: "snap_write_kb belongs to the write stage. Put the step in job.json with snap_job; the article's markdown is rendered from it later." };
-      }
-      if (toolName === "mcp__snap__snap_findings") {
-        return { behavior: "deny", message: "snap_findings belongs to the review stage — it is how findings come TO you, not something you file." };
-      }
-      // The article is whatever this job's first job.json write named; after
-      // that this job stays inside it. A capture agent wandering into another
-      // article would be writing over a finished one.
-      if (job.slug && input && typeof input.slug === "string" && input.slug !== job.slug) {
-        push(`Denied — touching the article "${input.slug}"; this job is building "${job.slug}".`);
-        return { behavior: "deny", message: `This job is building "${job.slug}". Do not read or write another article.` };
-      }
-      const tabId = toolName === "mcp__snap__snap_add" ? (input && input.at && input.at.tabId) : (input && input.tabId);
-      if (SNAP_TAB_TOOLS.has(toolName) || (toolName === "mcp__snap__snap_add" && tabId != null)) {
-        if (tabId == null) {
-          push(`Denied — ${doing(toolName, input)}: no browser tab was named.`);
-          return { behavior: "deny", message: `This tool requires an explicit tabId — either a session tab id you were given, or the one your mcp__chrome__navigate call returned.` };
-        }
-        // Adoption is started by onTabId, which does NOT hold the agent up — it
-        // reads a tool_result already on its way past, so the next tool call can
-        // arrive first. Waiting here is what makes a session tab id valid at the
-        // moment the agent is allowed to use it, instead of a race it loses.
-        if (adoptPromise) await adoptPromise;
-        if (jobTabId == null) {
-          push(`Denied — ${doing(toolName, input)}: this job has not opened its own browser tab yet.`);
-          return { behavior: "deny", message: "Call mcp__chrome__navigate first — that opens this job's tab and is also what puts the session's tabs within reach. On a fix round your previous tab is gone, so navigate again." };
-        }
-        if (!((tabId === jobTabId && !jobTabClosed) || adoptedTabIds.has(tabId))) {
-          const mine = [...(jobTabClosed ? [] : [jobTabId]), ...adoptedTabIds].join(", ");
-          push(`Denied — ${doing(toolName, input)}: browser tab ${tabId} is not one of this job's.`);
-          return { behavior: "deny", message: `tabId ${tabId} is not a tab this job may touch. The ones it may are: ${mine}.` };
-        }
-      }
-      return { behavior: "allow" };
+    // The article is whatever this job's first job.json write named; after
+    // that this job stays inside it. A capture agent wandering into another
+    // article would be writing over a finished one.
+    if (job.slug && input && typeof input.slug === "string" && input.slug !== job.slug) {
+      push(`Denied — touching the article "${input.slug}"; this job is building "${job.slug}".`);
+      return { behavior: "deny", message: `This job is building "${job.slug}". Do not read or write another article.` };
     }
-    push(`Denied — ${doing(toolName, input)}: not something this job may do.`);
-    return { behavior: "deny", message: `Tool "${toolName}" is not permitted for this unattended KB job.` };
+    if (toolName === "mcp__snap__snap_navigate" && input && typeof input.url === "string" && input.url && !originAllowed(input.url)) {
+      push(`Denied — going to ${shortUrl(input.url)}, which is outside the site(s) this job was given.`);
+      return { behavior: "deny", message: `Navigating to "${input.url}" is not allowed — this job is scoped to: ${[...allowedOrigins].join(", ")}. Stay within these, or stop and report if a different origin needs to be added to the session.` };
+    }
+    const tabId = toolName === "mcp__snap__snap_add" ? (input && input.at && input.at.tabId) : (input && input.tabId);
+    if (SNAP_TAB_TOOLS.has(toolName) || (toolName === "mcp__snap__snap_add" && tabId != null)) {
+      if (tabId == null) {
+        push(`Denied — ${doing(toolName, input)}: no browser tab was named.`);
+        return { behavior: "deny", message: `This tool requires an explicit tabId — one of the session tab ids you were given.` };
+      }
+      if (!sessionTabIds.has(tabId)) {
+        push(`Denied — ${doing(toolName, input)}: browser tab ${tabId} is not one of this job's.`);
+        return { behavior: "deny", message: `tabId ${tabId} is not a tab this job may touch. The ones it may are: ${[...sessionTabIds].join(", ")}.` };
+      }
+    }
+    return { behavior: "allow" };
   }
 
   const systemPrompt = [
@@ -657,10 +561,7 @@ async function runCaptureStage(job, ctx, push, findings, round) {
 
   return runStage(job, push, {
     name: "capture", round, systemPrompt, prompt,
-    mcpServers: {
-      chrome: { type: "http", url: chromeCfg.url, headers: chromeCfg.headers },
-      ...snapServer(snapSelf),
-    },
+    mcpServers: snapServer(snapSelf),
     canUseTool,
     // Only on the first pass. A fix round is allowed to end in an argument:
     // the prompt tells this stage to say so rather than make a change it does
@@ -683,11 +584,6 @@ async function runCaptureStage(job, ctx, push, findings, round) {
       }
       return null;
     } : null,
-    onTabId: (id) => {
-      jobTabId = id;
-      push(`This job's own browser tab is ${jobTabId}.`);
-      startAdoption(id);
-    },
   });
 }
 
@@ -843,11 +739,11 @@ async function runReviewStage(job, ctx, push, round) {
 
 /* ---- the pipeline ------------------------------------------------------ */
 
-async function runAuthorPipeline(job, instruction, markdown, sessionTabs, chromeCfg, snapSelf, push, tabs) {
+async function runAuthorPipeline(job, instruction, markdown, sessionTabs, snapSelf, push) {
   const allowedOrigins = originsOf(sessionTabs);
   if (!allowedOrigins.size) throw new Error("none of this job's session tabs have a URL that could be parsed to navigate to.");
 
-  const ctx = { instruction, markdown, sessionTabs, allowedOrigins, chromeCfg, snapSelf, tabs, review: null };
+  const ctx = { instruction, markdown, sessionTabs, allowedOrigins, snapSelf, review: null };
   const running = () => job.status === "running";
 
   await runCaptureStage(job, ctx, push, null, 0);
@@ -919,13 +815,8 @@ async function runAuthorPipeline(job, instruction, markdown, sessionTabs, chrome
  *  means one finished job: a capture stage ending successfully is the middle of
  *  the job, and writing job.status = "done" there would have told the UI the
  *  article was ready before a word of it was written. The caller — a stage in
- *  runStage(), or runReviseJob() — is the only place that knows which.
- *
- *  opts.onTabId is wired for the capture stage only: canUseTool sees call INPUTS
- *  and never results, so the tabId Chrome Bridge assigned can only be learned
- *  here, off the navigate tool_result (a "user"-role message) streaming past. */
+ *  runStage(), or runReviseJob() — is the only place that knows which. */
 async function consumeStream(q, job, push, opts = {}) {
-  const pendingNavigateIds = new Set();
   // Which tools this session actually called, so a caller can require the one
   // that constitutes its output. Counting snap_render_job as well as
   // snap_write_kb is not a nicety: for a multi-step article the skill RECOMMENDS
@@ -958,7 +849,6 @@ async function consumeStream(q, job, push, opts = {}) {
           // prefix (bridge-kb.js's lineClass), and it reads as a bullet.
           push(`→ ${describeToolUse(block.name, block.input)}`);
           pendingCalls.set(block.id, block.name);
-          if (opts.onTabId && block.name === "mcp__chrome__navigate") pendingNavigateIds.add(block.id);
         }
       }
     } else if (msg.type === "user" && msg.message && Array.isArray(msg.message.content)) {
@@ -968,11 +858,6 @@ async function consumeStream(q, job, push, opts = {}) {
         if (name) {
           pendingCalls.delete(block.tool_use_id);
           if (!block.is_error) calledTools.add(name);
-        }
-        if (pendingNavigateIds.has(block.tool_use_id)) {
-          pendingNavigateIds.delete(block.tool_use_id);
-          const tabId = extractTabId(block.content);
-          if (tabId != null) opts.onTabId(tabId);
         }
       }
     } else if (msg.type === "result") {
@@ -1047,6 +932,8 @@ export function describeToolUse(name, input) {
   switch (name) {
     // --- snap: the article itself ---
     case "mcp__snap__snap_status":         return "Checking the Snap Studio extension is connected";
+    case "mcp__snap__snap_navigate":       return `Going to ${shortUrl(i.url)}`;
+    case "mcp__snap__snap_look":           return "Taking a look at the page";
     case "mcp__snap__snap_capture_tab":    return `Snapping the page${i.out ? ` → ${fileTail(i.out)}` : ""}`;
     case "mcp__snap__snap_open":           return `Opening ${fileTail(i.path) || "the capture"} in the editor`;
     case "mcp__snap__snap_kit":            return "Reading the annotation kit";
@@ -1079,23 +966,9 @@ export function describeToolUse(name, input) {
     case "mcp__snap__snap_frame_find":     return `Looking for ${quoted(i.text) || "an element"} on the page`;
     case "mcp__snap__snap_frame_scroll":   return i.selector ? `Scrolling to ${quoted(i.selector, 32)}` : "Scrolling the page";
     case "mcp__snap__snap_frame_click":    return `Clicking ${quoted(i.selector, 32) || "an element"}`;
+    case "mcp__snap__snap_frame_fill":     return `Filling in ${quoted(i.selector, 32) || "a field"}`;
+    case "mcp__snap__snap_frame_press":    return `Pressing ${shortText(i.key, 16) || "a key"}`;
 
-    // --- chrome: driving the app ---
-    case "mcp__chrome__navigate":          return `Going to ${shortUrl(i.url)}`;
-    case "mcp__chrome__click":             return `Clicking ${quoted(firstOf(i, ["text", "selector", "element", "ref", "uid"]), 32) || "an element"}`;
-    case "mcp__chrome__fill":
-    case "mcp__chrome__fill_form":         return `Filling in ${quoted(firstOf(i, ["selector", "element", "ref", "name"]), 32) || "the form"}`;
-    case "mcp__chrome__type_text":         return `Typing ${quoted(firstOf(i, ["text", "value"])) || "into the page"}`;
-    case "mcp__chrome__press_key":         return `Pressing ${shortText(firstOf(i, ["key", "keys"]), 16) || "a key"}`;
-    case "mcp__chrome__scroll":            return "Scrolling the page";
-    case "mcp__chrome__find":              return `Looking for ${quoted(firstOf(i, ["text", "query", "selector"])) || "an element"}`;
-    case "mcp__chrome__wait_for":          return `Waiting for ${quoted(firstOf(i, ["text", "selector", "condition"])) || "the page"}`;
-    case "mcp__chrome__take_screenshot":   return "Taking a look at the page";
-    case "mcp__chrome__list_tabs":         return "Listing the open tabs";
-    case "mcp__chrome__switch_tab":        return "Switching browser tab";
-    case "mcp__chrome__close_tab":         return "Closing the browser tab";
-    case "mcp__chrome__resize_window":     return "Resizing the browser window";
-    case "mcp__chrome__chrome_status":     return "Checking the browser bridge";
     default: {
       // A tool this map has not caught up with yet — still readable, and it
       // names itself so the gap is obvious rather than silent.
@@ -1106,25 +979,6 @@ export function describeToolUse(name, input) {
   }
 }
 
-/** Best-effort tabId extraction from an mcp__chrome__navigate tool_result.
- *  Not a security boundary by itself — canUseTool already refused the
- *  navigate call up front if its target url was out of scope, so any tabId
- *  this finds necessarily belongs to a tab that was just sent to an allowed
- *  origin. Tries structured JSON first (MCP text content is often a
- *  JSON-stringified object like {tabId, url, title, status}), falls back to
- *  a bare regex since the exact result shape is Chrome Bridge's own and not
- *  documented here. */
-function extractTabId(content) {
-  const text = Array.isArray(content)
-    ? content.map((c) => (typeof c === "string" ? c : (c && c.text) || "")).join(" ")
-    : (typeof content === "string" ? content : JSON.stringify(content || ""));
-  try {
-    const parsed = JSON.parse(text);
-    if (parsed && typeof parsed.tabId === "number") return parsed.tabId;
-  } catch {}
-  const m = /"?tabId"?\s*[:=]\s*(\d+)/.exec(text);
-  return m ? Number(m[1]) : null;
-}
 /* ---------------------------------------------------------------------
    Revise mode — the prompt box in KB Studio's article panel. The user types
    at an article that already EXISTS instead of asking for a new one, so this

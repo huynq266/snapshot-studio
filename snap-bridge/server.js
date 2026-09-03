@@ -15,7 +15,6 @@ import { WebSocketServer } from "ws";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import { loadChromeBridgeConfig } from "./chrome-bridge-config.js";
 import { startJob, cancelJob, getCurrentJob, getReviseSession, resetReviseSession, noteJobSlug, currentReviewRound } from "./kb-job.js";
 import { writeReview, summarizeReview, REVIEW_OWNERS, REVIEW_SEVERITIES } from "./kb-review.js";
 import { readJobLog, jobLogPath } from "./kb-log.js";
@@ -205,16 +204,6 @@ function handleKbCommand(ws, msg) {
         markdown: args.markdown,
         mdFilename: args.mdFilename,
         sessionTabs: args.sessionTabs,
-        // How a job reaches the tabs the user put in its session. kb-job.js
-        // cannot call the extension itself (this file imports it, not the other
-        // way round), so the two calls are handed down. adopt() moves those tabs
-        // into the tab group Chrome Bridge gave the job, which is the whole reason
-        // the job can work on the user's real tab instead of re-opening its URL;
-        // release() puts them back. See bridge-worker.js's cmdAdoptTabs.
-        tabs: {
-          adopt: (jobTabId, tabIds) => callExtension("adopt_tabs", { jobTabId, tabIds }),
-          release: (tabIds) => callExtension("release_tabs", { tabIds }),
-        },
         snapSelf: { url: `http://127.0.0.1:${PORT}/mcp`, token: TOKEN },
         onProgress: pushKbProgress,
       });
@@ -961,10 +950,60 @@ function buildMcpServer() {
     }
   });
 
-  mcp.registerTool("snap_capture_tab", {
-    description: "Capture an ALREADY-OPEN Chrome tab to a PNG file under kb/ — it does not navigate or open tabs itself. Use mcp__chrome__navigate (and click/fill as needed to reach the right screen) first, note the tabId it returns (also available from mcp__chrome__list_tabs), then pass that tabId here — the precise way to say which tab, no guessing. Use this before snap_open — it is the only path that writes a screenshot to disk (mcp__chrome__take_screenshot returns the image inline and never writes a file).",
+  mcp.registerTool("snap_list_tabs", {
+    description: "List every open, capturable Chrome tab (id, title, url) — not scoped to any group, since Snap Studio's own extension permissions cover every tab in the browser. Use this to find the tabId of a tab that's already open before calling snap_navigate/snap_capture_tab/snap_frame_* on it; if nothing matches, open one with snap_new_tab.",
+    inputSchema: {},
+  }, async () => {
+    const data = await callExtension("list_tabs", {}, 10000);
+    return text(JSON.stringify(data.tabs, null, 2));
+  });
+
+  mcp.registerTool("snap_new_tab", {
+    description: "Open a new Chrome tab, optionally at a URL. Use when snap_list_tabs has nothing suitable already open. Returns the new tab's id — pass that to snap_navigate/snap_frame_*/snap_capture_tab from here on.",
     inputSchema: {
-      tabId: z.number().int().optional().describe("Exact Chrome tab id, e.g. from mcp__chrome__navigate's or mcp__chrome__list_tabs' result. Preferred over url — unambiguous even when more than one open tab could match a URL."),
+      url: z.string().optional().describe("URL to load in the new tab. Omit to open about:blank."),
+    },
+  }, async ({ url }) => {
+    const data = await callExtension("new_tab", { url }, 20000);
+    return text(`Opened tab ${data.tabId}${data.url ? ` — ${data.url}` : ""}${data.title ? ` ("${data.title}")` : ""}`);
+  });
+
+  mcp.registerTool("snap_navigate", {
+    description: "Navigate an already-open Chrome tab to a URL — reaches the same tab mcp__chrome__navigate would, without depending on Chrome Bridge. No implicit \"current tab\": every call names the tabId it navigates, so there is nothing to fall back onto and get wrong. See CHROME-BRIDGE-EXIT-PLAN.md mục 5.1 for why, including the one real gap (an embedded SPA can finish loading its OWN content after this returns — confirm with snap_frame_find before capturing, and add a wait if that is not enough).",
+    inputSchema: {
+      tabId: z.number().int().describe("Chrome tab id to navigate, e.g. from snap_list_tabs or snap_new_tab."),
+      url: z.string().describe("URL to load in that tab."),
+    },
+  }, async ({ tabId, url }) => {
+    const data = await callExtension("navigate", { tabId, url }, 20000);
+    return text(`Navigated tab ${data.tabId} to ${data.url}${data.title ? ` ("${data.title}")` : ""}`);
+  });
+
+  mcp.registerTool("snap_look", {
+    description: "Look at an already-open Chrome tab right now — returns the screenshot inline, same shot snap_capture_tab takes, but does NOT write a file. Use this to check where you are before deciding what to do next; use snap_capture_tab for the shot that actually goes into the article.",
+    inputSchema: {
+      tabId: z.number().int().describe("Chrome tab id, e.g. from snap_navigate's, snap_new_tab's, or snap_list_tabs' result."),
+    },
+  }, async ({ tabId }) => {
+    const data = await callExtension("capture_tab", { tabId }, 20000);
+    const b64 = data.dataUrl.slice(data.dataUrl.indexOf(",") + 1);
+    const bytes = Buffer.from(b64, "base64");
+    const MAX_INLINE = 4 * 1024 * 1024;
+    if (bytes.length > MAX_INLINE) {
+      throw new Error(`tab ${tabId} is ${(bytes.length / 1048576).toFixed(1)}MB as a PNG — too big to return inline. Use snap_capture_tab (writes to kb/) and snap_view instead.`);
+    }
+    return {
+      content: [
+        { type: "text", text: `${data.width}x${data.height} — ${data.url}` },
+        { type: "image", data: b64, mimeType: "image/png" },
+      ],
+    };
+  });
+
+  mcp.registerTool("snap_capture_tab", {
+    description: "Capture an ALREADY-OPEN Chrome tab to a PNG file under kb/ — it does not navigate or open tabs itself. Use snap_navigate (and snap_frame_click/snap_frame_fill as needed to reach the right screen) first, or snap_list_tabs to find one already open, then pass that tabId here — the precise way to say which tab, no guessing. Use this before snap_open — it is the only path that writes a screenshot to disk (snap_look returns the image inline and never writes a file).",
+    inputSchema: {
+      tabId: z.number().int().optional().describe("Exact Chrome tab id, e.g. from snap_navigate's, snap_new_tab's, or snap_list_tabs' result. Preferred over url — unambiguous even when more than one open tab could match a URL."),
       url: z.string().optional().describe("Fallback when tabId is not known: substring to match against an already-open tab's URL (fuzzy, not exact)."),
       out: z.string().describe("Output path, relative to the kb/ directory, e.g. \"img/01-dashboard.png\""),
     },
@@ -1360,7 +1399,7 @@ function buildMcpServer() {
   mcp.registerTool("snap_frame_list", {
     description: "List every frame (main frame + all iframes, cross-origin included) in an already-open tab: frameId, parentFrameId, url. Use this to find a cross-origin iframe's frameId or a URL substring — mcp__chrome__scroll/find/click cannot reach inside such an iframe (Chrome Bridge's activeTab grant only covers the tab's main-frame origin); the snap_frame_* tools below go through Snap Studio's own extension permissions instead, which already cover every origin (host_permissions: <all_urls>).",
     inputSchema: {
-      tabId: z.number().int().describe("Chrome tab id, e.g. from mcp__chrome__navigate or mcp__chrome__list_tabs."),
+      tabId: z.number().int().describe("Chrome tab id, e.g. from snap_navigate, snap_new_tab, or snap_list_tabs."),
     },
   }, async ({ tabId }) => {
     const data = await callExtension("frame_list", { tabId }, 10000);
@@ -1407,6 +1446,34 @@ function buildMcpServer() {
   }, async ({ tabId, frameId, frameUrlContains, selector }) => {
     const data = await callExtension("frame_click", { tabId, frameId, frameUrlContains, selector }, 15000);
     return text(`Clicked "${selector}" (resolved to <${data.clickedTag}>${"checked" in data ? `, checked: ${data.checked}` : ""}).`);
+  });
+
+  mcp.registerTool("snap_frame_fill", {
+    description: "Set a form control's value inside a specific frame (cross-origin iframe included), then fire input+change so the page's own framework notices — reaches where mcp__chrome__fill/fill_form/type_text cannot. Get the selector from snap_frame_find first.",
+    inputSchema: {
+      tabId: z.number().int().describe("Chrome tab id."),
+      frameId: z.number().int().optional().describe("Exact frame id from snap_frame_list. Preferred over frameUrlContains."),
+      frameUrlContains: z.string().optional().describe("Fallback: substring to match a frame's URL."),
+      selector: z.string().describe("CSS selector of the input/textarea/select to fill."),
+      value: z.string().describe("Value to set."),
+    },
+  }, async ({ tabId, frameId, frameUrlContains, selector, value }) => {
+    const data = await callExtension("frame_fill", { tabId, frameId, frameUrlContains, selector, value }, 15000);
+    return text(`Filled "${selector}" — value is now ${JSON.stringify(data.value)}.`);
+  });
+
+  mcp.registerTool("snap_frame_press", {
+    description: "Dispatch a key press (keydown + keyup) inside a specific frame — Enter, Escape, Tab, etc. Targets a selector if given, otherwise the frame's own document.activeElement. Get the selector from snap_frame_find first.",
+    inputSchema: {
+      tabId: z.number().int().describe("Chrome tab id."),
+      frameId: z.number().int().optional().describe("Exact frame id from snap_frame_list. Preferred over frameUrlContains."),
+      frameUrlContains: z.string().optional().describe("Fallback: substring to match a frame's URL."),
+      key: z.string().describe("Key value, e.g. \"Enter\", \"Escape\", \"Tab\"."),
+      selector: z.string().optional().describe("CSS selector to target. Omit to use the frame's currently focused element."),
+    },
+  }, async ({ tabId, frameId, frameUrlContains, key, selector }) => {
+    const data = await callExtension("frame_press", { tabId, frameId, frameUrlContains, key, selector }, 15000);
+    return text(`Pressed "${key}" on <${data.target || "document"}>.`);
   });
 
   mcp.registerTool("snap_export", {
@@ -1539,8 +1606,4 @@ httpServer.listen(PORT, "127.0.0.1", () => {
   console.error(`[snap-bridge] MCP:   http://127.0.0.1:${PORT}/mcp   (token in ${TOKEN_PATH})`);
   console.error(`[snap-bridge] WS:    ws://127.0.0.1:${PORT}/ext     (waiting for the Snap Studio extension)`);
   console.error(`[snap-bridge] files: ${OUT_ROOT}`);
-  const chromeCfg = loadChromeBridgeConfig();
-  console.error(chromeCfg.ok
-    ? `[snap-bridge] chrome: found Chrome Bridge at ${chromeCfg.url} (KB jobs can drive the browser)`
-    : `[snap-bridge] chrome: not found — ${chromeCfg.reason} (KB jobs will fail to start until this is fixed; the six snap_* tools above are unaffected)`);
 });

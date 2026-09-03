@@ -361,6 +361,45 @@ Bridge **dùng lại B**, không đẻ tab mới. Hai kết luận:
 chính tab của người dùng (trong origin cho phép) — tức chấp nhận làm mất state của tab đó. Đổi
 lại là đúng thứ người dùng yêu cầu: không có tab lạ nào nằm lại sau khi job chạy.
 
+### Khép lại câu chuyện tab group — Chrome Bridge bỏ hẳn khỏi stage capture (2026-09-03)
+
+Hai mục ngay trên (2026-08-28 → 2026-09-02) là cả một hành trình: bỏ tab thật vì Chrome Bridge
+từ chối tab ngoài group của nó → agent tự mở tab riêng, mất hết trạng thái người dùng → dựng lại
+bằng adopt hai pha (navigate không tabId để group thành hình, `adopt_tabs` kéo session tab vào,
+`release_tabs` trả lại lúc job xong) → chạy thật, xác nhận đúng, đóng luôn tab tạm sau khi adopt.
+Mọi kết luận trong hai mục đó **đúng ở thời điểm viết** — đây không phải đính chính, mà là khép
+lại: cả cơ chế đó chỉ tồn tại để lách đúng MỘT giới hạn, và giới hạn đó vừa bị gỡ bỏ theo cách
+khác hẳn.
+
+**Cái đã đổi**: `CHROME-BRIDGE-EXIT-PLAN.md` (lập 2026-09-02, chạy 2026-09-03) nhận ra bốn tool
+`snap_frame_*` sẵn có (từ mục "Điều khiển nội dung trong iframe cross-origin" phía trên) đã đi
+qua `chrome.scripting.executeScript` của chính Snap Studio — **không hề bị Chrome Bridge hay tab
+group nào scope cả**, vì nó không phải Chrome Bridge. Thêm bốn tool cùng họ
+(`snap_navigate`/`snap_frame_fill`/`snap_frame_press`/`snap_look`, GĐ 1) là đủ để stage capture
+không cần `mcp__chrome__*` một chút nào nữa. GĐ 2 bỏ hẳn `chrome` khỏi `mcpServers` của stage đó
+và thay hàng rào `canUseTool` cũ (mượn group-membership của Chrome Bridge) bằng một whitelist
+`tabId` phẳng ngay trong chính `kb-job.js` — session tab dùng được **từ lệnh đầu tiên**, không
+còn "mở đường"/group/adopt gì cả. GĐ 3 xoá hẳn cơ chế adopt: `cmdAdoptTabs`/`cmdReleaseTabs`/
+`adoptedTabs`/`TAB_GROUP_ID_NONE` trong `bridge-worker.js`, `CHROME_SAFE_TOOLS`/`extractTabId`/
+`pendingNavigateIds`/`onTabId` trong `kb-job.js`, và `chrome-bridge-config.js` cùng
+`adopt-tabs.test.mjs` — cả hai file biến mất.
+
+**Nghiệm thu bằng job thật**, ngay trong lúc GĐ 2 vừa xong: bài "How to translate Qikify Volume
+Discount app settings and offers" (`kb/translate-volume-discount-app`) — đúng app iframe
+cross-origin của mục "Điều khiển nội dung..." — chạy trọn capture → write → review, verdict
+"pass", **không mở tab mới, không dời tab nào**. Log không có một dòng nào nhắc "adopt"/"tab
+tạm"/"mở đường" — điều mục 2026-09-02 coi là thành tựu ("đóng được tab tạm sau adopt") giờ không
+còn tồn tại để đóng nữa, vì không còn tab tạm nào được mở ra từ đầu.
+
+**Đánh đổi thật, không phải miễn phí**: mục 2026-09-02 (dòng 360-362) có một đường lùi — tab
+không adopt được thì rơi về "navigate tab của job tới URL, mất state". Đường lùi đó **biến mất
+theo** cả cơ chế adopt: job giờ không có cách mở tab nào của riêng nó nữa (không `new_tab`,
+không "tab của job" như trước). Tab session không dùng được thì job dừng lại và báo đúng tab nào
+cần mở lại — không còn "vẫn chạy được, chỉ mất state" như trước, mà là "dừng, cần người can
+thiệp". Đổi lại đúng thứ toàn bộ câu chuyện này theo đuổi từ đầu: không tab lạ nào bị mở, không
+tab nào bị dời, và không còn phụ thuộc vào hành vi nội bộ (group-membership vs danh sách tabId)
+của một extension khác mà repo này không kiểm soát phiên bản.
+
 ### Ảnh chụp bị ám vàng/cam — xác nhận không phải Chrome Bridge, không phải Night Light, nguồn thật chưa chốt (2026-08-28)
 
 Người dùng báo ảnh trong `kb/img/test-01-nav*.png` và `kb/demo-job/01-nav.png` bị dính một lớp
@@ -453,6 +492,72 @@ activate tab của nhóm nó khi mở trang, và đó là extension khác.
 **Đường `resolveTarget()` không đụng tới**: đó là nhánh `snap_capture_tab` không có `tabId`,
 mà `canUseTool` trong `kb-job.js` từ chối thẳng nhánh đó — job luôn phải truyền `tabId` từ
 `navigate`. Nó chỉ còn phục vụ nút Snap trên toolbar, nơi người dùng vừa bấm và đang nhìn.
+
+### Nháy tab lúc chụp — chuyển hẳn sang CDP, không còn phải activate (2026-09-03)
+
+`shootQuietly()` (mục ngay trên) đã giảm cái nháy tab tối đa có thể **trong giới hạn của
+`chrome.tabs.captureVisibleTab`** — nhưng không xoá được nó, vì API đó **bắt buộc** tab phải
+đang active của cửa sổ mới chụp được. Người dùng hỏi thẳng: Chrome Bridge's
+`mcp__chrome__take_screenshot` sao không nháy gì cả — có phải do tab group?
+
+**Không phải tab group.** Tab group là ranh giới *quyền* (tab nào Chrome Bridge được đụng),
+không liên quan gì tới việc chụp có lộ ra ngoài hay không. Lý do thật: `take_screenshot` của
+Chrome Bridge dùng **CDP** (`Page.captureScreenshot` qua `chrome.debugger`), đọc pixel thẳng từ
+renderer của tab qua kênh debug — **không cần tab đó là tab active**. Khác hẳn
+`captureVisibleTab`, chỉ chụp được đúng tab active của window được truyền vào.
+
+**Xác minh bằng thực nghiệm**, không suy đoán: mở 2 tab qua Chrome Bridge, `list_tabs` xác nhận
+**cả hai `active:false`**, rồi `take_screenshot` thẳng lên từng tab nền. Cả hai lần đều chụp ra
+đúng nội dung thật (trang "Example Domain", trang chủ Wikipedia đầy đủ) — không trắng, không
+hỏng.
+
+**Đính chính mục "Ảnh chụp bị ám vàng/cam" (2026-08-28) ở trên**: dòng ghi CDP trả về "ảnh
+trắng sạch tuyệt đối" **không phải** bằng chứng CDP chụp tab nền nói chung không đáng tin — đó
+là kết quả của MỘT lần tái hiện đúng một bug render cụ thể (mà `captureVisibleTab` tình cờ bắt
+được, CDP thì không), không phải một phép test độ tin cậy tổng quát. Test lần này (2026-09-03)
+mới thật sự trả lời câu hỏi "CDP có chụp được tab nền không" — và câu trả lời là có.
+
+**Vậy sao không đổi hẳn sang CDP từ đầu?** Vì repo này **đã thử `chrome.debugger` cho việc khác
+rồi bỏ** (`snap_frame_click_native`, mục "Cách A" phía trên) — gắn quyền `debugger` thì Chrome
+hiện banner vàng **cố định** "đang bị debug bởi một tiện ích mở rộng" trên mọi cửa sổ, suốt thời
+gian còn gắn. Lần này khác ở chỗ: **chỉ attach đúng lúc chụp** (`attach` → `Page.captureScreenshot`
+→ `detach` trong `finally`, không giữ), nên banner chỉ nháy ~100-300ms mỗi lần chụp thay vì dán
+suốt cả job — đánh đổi chấp nhận được.
+
+**Cài đặt**: `shootViaDebugger(tab)` trong `src/bridge-worker.js`. `cmdCaptureTab()` thử CDP
+trước cho nhánh có `tabId`/`url` (đường `snap_capture_tab`/`snap_look` dùng); nếu CDP từ chối
+(DevTools đang mở sẵn trên tab đó → "Another debugger is already attached", tab `chrome://`,
+v.v.) thì rơi về `shootQuietly()` cũ, không cắt đường lui. Nhánh `resolveTarget()` (nút Snap thủ
+công, không có `tabId`/`url`) **giữ nguyên** `shootVisibleTab` — ở đó activate là chủ ý (người
+dùng vừa bấm và đang nhìn), không có gì để giấu. Quyền mới trong `manifest.json`: `"debugger"`.
+
+**Xác nhận bằng người dùng thật**, hai lần, ngay trong lúc theo dõi màn hình: gọi `snap_look`
+lên một tab đã xác nhận `active:false` qua `list_tabs` — cả hai lần người dùng đều báo **không
+thấy gì nháy**, đúng như thiết kế.
+
+### Tab trong session tự động group, phân biệt với tab người dùng tự mở (2026-09-03)
+
+Từ `CHROME-BRIDGE-EXIT-PLAN.md` GĐ 2, tab group **không còn là ranh giới quyền** nữa —
+`mcp__snap__*` làm việc thẳng trên bất kỳ `tabId` nào trong `sessionTabs` job được giao, không
+cần group nào của Chrome Bridge nữa (xem mục "Nghiệm thu thật" trong file đó — một job KB thật
+chạy xong, không mở tab mới, không dời tab nào). Nhưng group vẫn có giá trị **thuần hình ảnh**:
+nhìn vào thanh tab là biết ngay tab nào đang "thuộc về" một job KB, phân biệt với tab người dùng
+tự mở/điều hướng trong lúc job chạy.
+
+**Cài đặt**: `groupIntoKbSession(tabId)` trong `src/bridge-worker.js`, gọi từ `addKbSessionTab()`
+mỗi khi người dùng bấm "+" trong KB Studio. Tab đầu tiên thêm vào session tạo group mới, đặt tên
+**"KB job"**, màu cyan (`chrome.tabGroups.update` — quyền `tabGroups` mới thêm vào
+`manifest.json`); tab sau join đúng group đó qua `chrome.tabs.group({tabIds, groupId})`. Group
+cũ đã mất (Chrome tự dissolve group rỗng, không có API "xoá group" tường minh) thì tự phát hiện
+lỗi và tạo group mới. `removeKbSessionTab()` ungroup tab đó khi bỏ khỏi session. Không lỗi nào ở
+đây được coi là chặn — nhóm tab hỏng (VD tab bị pin, `chrome.tabs.group()` từ chối) thì
+`kbSessionTabIds` vẫn hoạt động bình thường, group chỉ là tiện ích thêm.
+
+**Không phải ranh giới an toàn**: `canUseTool` trong `kb-job.js` không đọc `groupId` này ở đâu
+cả — hoàn toàn là bookkeeping hiển thị, tách bạch khỏi whitelist `tabId` thật (GĐ 2).
+
+**Xác nhận bằng người dùng thật**: bấm "+" thêm tab trong KB Studio → group "KB job" màu cyan
+xuất hiện đúng như thiết kế.
 
 ### Cửa sổ Windows Terminal nhảy lên mỗi lần render (2026-08-30)
 

@@ -26,31 +26,42 @@ các luật rút ra từ lỗi đã ship thật.
   Kiểm tra bằng `snap_status` → phải trả `{"connected":true}`.
 - **App đang mở sẵn trong Chrome thật, đã đăng nhập.** Pipeline này cố tình chạy trên profile
   thật (xem `KB-BRIDGE.md` 5.2) — không tự đăng nhập hộ.
-- Nếu là topology B (spawn từ UI KB Studio): job **dùng đúng các tab người dùng đã đưa vào
-  session**, nhưng phải mở đường trước. Gọi `mcp__chrome__navigate` **không kèm `tabId`** đúng
-  một lần — thao tác đó mở một tab tạm, và chính nó làm tab group của phiên thành hình; ngay
-  sau đó snap-bridge kéo các tab session vào group ấy **rồi đóng tab tạm đi**. Từ đó truyền
-  thẳng **tabId của tab người dùng** cho mọi `snap_capture_tab`/`snap_frame_*`/`snap_add`'s
-  `at.tabId`. Cái được: trang vẫn đang ở đúng chỗ người dùng đã cuộn / mở panel / điền dở
-  trước khi bấm Start — thường đúng là state bài viết cần chụp.
-  **Luôn kèm `tabId`, kể cả cho `mcp__chrome__*`.** Sau lần navigate đầu tiên bạn không còn tab
-  riêng nào để mặc định về nữa, nên lệnh thiếu `tabId` sẽ rơi vào một tab BẤT KỲ của người dùng
-  trong group — và navigate nhầm tab đó là xoá sạch đúng cái state bạn được giao.
-  **Nếu một tab không dùng được** (đã pin, đã đóng, hoặc log báo không kéo được) thì lùi về
-  cách cũ cho riêng tab đó: navigate tab của chính job tới URL ấy rồi tự bấm về đúng màn hình.
-  Điều hướng chỉ được trong đúng **origin** của các URL trong session, nơi khác bị từ chối;
-  `new_tab` luôn bị từ chối — luôn dùng `navigate` kể cả cho trang đầu tiên. Nếu cần một origin
-  không có trong session, dừng lại và báo rõ cần thêm tab nào.
+- Nếu là topology A (gõ `/kb` trực tiếp trong phiên Claude Code thường): không có sessionTabs
+  nào được giao sẵn — tự tìm hoặc tự mở tab bằng `snap_list_tabs` (liệt kê mọi tab Chrome thật
+  đang mở, không giới hạn theo group nào — không như `mcp__chrome__list_tabs` cũ) và
+  `snap_new_tab({url})` khi chưa có tab đúng đang mở. Từ đó dùng đúng `tabId` đó cho mọi
+  `snap_navigate`/`snap_frame_*`/`snap_capture_tab`/`snap_look`/`snap_add`'s `at.tabId` — không
+  có khái niệm "tab hiện tại", luôn truyền `tabId`.
+- Nếu là topology B (spawn từ UI KB Studio): job **không dùng `mcp__chrome__*` nữa** — Chrome
+  Bridge không còn được gắn vào stage capture (CHROME-BRIDGE-EXIT-PLAN.md GĐ 2). Các tab người
+  dùng đã đưa vào session dùng được **ngay từ lệnh đầu tiên**, bằng đúng `tabId` thật của chúng
+  (liệt kê sẵn trong prompt) — không có tab tạm, không có bước "mở đường"/adopt nào cả. Truyền
+  thẳng tabId đó cho mọi `snap_navigate`/`snap_frame_*`/`snap_capture_tab`/`snap_look`/
+  `snap_add`'s `at.tabId`. Cái được: trang vẫn đang ở đúng chỗ người dùng đã cuộn / mở panel /
+  điền dở trước khi bấm Start — thường đúng là state bài viết cần chụp.
+  **Luôn kèm `tabId` — mọi tool trên đều bắt buộc, không có khái niệm "tab hiện tại".**
+  `snap_navigate` chỉ đổi URL của một `tabId` đã cho; job này **không có cách mở tab mới**.
+  **Nếu một tab không dùng được** (đã đóng, hoặc bị từ chối) thì **dừng lại và nói rõ** tab nào
+  cần được mở lại và thêm vào session — không còn đường lùi nào khác.
+  Điều hướng (`snap_navigate`) chỉ được trong đúng **origin** của các URL trong session, nơi
+  khác bị từ chối. Nếu cần một origin không có trong session, dừng lại và báo rõ cần thêm tab
+  nào.
 
 ## Bộ tool
 
 | Tool | Việc |
 |---|---|
 | `snap_status` | Extension còn nối không |
+| `snap_list_tabs` | Liệt kê mọi tab Chrome thật đang mở (id/title/url) — không giới hạn theo group. Dùng để tìm `tabId` trước khi navigate/chụp |
+| `snap_new_tab` | Mở tab mới, kèm URL tuỳ chọn — dùng khi `snap_list_tabs` không có sẵn tab phù hợp |
+| `snap_navigate` | Điều hướng một tab **đã có sẵn** (`tabId` bắt buộc) tới URL khác — không mở tab mới, không có "tab hiện tại" mặc định |
 | `snap_frame_list` | Liệt kê frame trong tab (kể cả iframe cross-origin) |
 | `snap_frame_find` | Tìm text trong frame → selector **duy nhất** + `rect` thật |
 | `snap_frame_scroll` | Cuộn trong frame |
 | `snap_frame_click` | Click trong frame |
+| `snap_frame_fill` | Set giá trị input/textarea/select trong frame, tự bắn `input`+`change` cho framework nhận |
+| `snap_frame_press` | Bắn một phím (Enter/Escape/Tab…) trong frame, trên selector hoặc phần tử đang focus |
+| `snap_look` | Nhìn nhanh một tab **ngay bây giờ** — trả ảnh inline, **không** ghi file. Để kiểm tra trước khi quyết định bước tiếp, không phải ảnh cho bài |
 | `snap_capture_tab` | Chụp tab → ghi PNG vào `kb/img/` (đường **duy nhất** ghi được file) |
 | `snap_kit` | `use_when`/`gotchas`, **cộng `anchor` + tên prop thật + giá trị mặc định** của từng component — gọi để chọn component **và để tra tên prop, đừng đoán** |
 | `snap_open` | Nạp PNG vào editor |
@@ -64,9 +75,6 @@ các luật rút ra từ lỗi đã ship thật.
 | `snap_view` | **Nhìn** một ảnh trong `kb/` — thay cho `Read` khi phiên không đọc được file. `grid:true` phủ lưới toạ độ có nhãn: bắt buộc khi cần **đọc** một con số x/y |
 | `snap_learn` | Append một LEARNING vào `PLACEMENT_PLAYBOOK.md`. Ngày và id (`L-<ngày>-<chữ>`) được đóng dấu sẵn. Không xoá/sửa được mục cũ; chứng minh được một mục là sai thì `supersedes: "<id>"` để nó thôi được nạp vào job sau |
 
-`mcp__chrome__*` dùng để điều hướng (`navigate`, `click`, `fill`, `take_screenshot` để *nhìn*).
-**`mcp__chrome__take_screenshot` không ghi file** — ảnh cho bài viết phải từ `snap_capture_tab`.
-
 ## Quy trình
 
 ### 0. Bài này đã có chưa? Đọc comment trước khi đụng vào
@@ -79,13 +87,13 @@ Một bước = một màn hình. Với mỗi bước: đường dẫn cần t�
 annotation dự kiến. Bước 1 **luôn** định vị trong menu (playbook #4).
 
 ### 2. Điều hướng tới đúng màn hình, đúng state
-`mcp__chrome__navigate` → click/fill để tới đúng trạng thái.
-
-> ⚠️ **Nếu `mcp__chrome__scroll` / `find` / `click` chạy mà không có tác dụng gì** — cuộn không
-> nhúc nhích, `find` trả 0 match cho text đang hiện rõ trên màn hình — thì nội dung nằm trong
-> **iframe cross-origin** và các tool đó không với tới được. **Đừng lặp lại chúng.** Chuyển sang:
-> `snap_frame_list` (tìm frame) → `snap_frame_find` (lấy selector) → `snap_frame_scroll` /
-> `snap_frame_click`. Xem `KB-BRIDGE.md` phần iframe cross-origin để hiểu vì sao.
+`snap_list_tabs` để tìm tab đã mở sẵn, hoặc `snap_new_tab({url})` nếu chưa có; `snap_navigate({tabId, url})`
+để đổi URL một tab đã có — luôn kèm `tabId`, không có "tab hiện tại" mặc định. Từ đó
+`snap_frame_list` (tìm frame) → `snap_frame_find` (lấy selector) → `snap_frame_scroll` /
+`snap_frame_click` / `snap_frame_fill` / `snap_frame_press` để đi tới đúng trạng thái — đi
+thẳng đường này ngay từ đầu, đừng đoán mò bằng cách khác trước: nội dung app điển hình (Shopify
+admin, v.v.) nằm trong **iframe cross-origin**, và các tool này là đường duy nhất với tới được.
+Xem `KB-BRIDGE.md` phần iframe cross-origin để hiểu vì sao.
 
 ### 3. Xác minh target CÓ trong khung trước khi chụp
 `snap_frame_find` trả `rect` thật. Nếu `rect.y` âm hoặc > chiều cao viewport → **chưa có trong

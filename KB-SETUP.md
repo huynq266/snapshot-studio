@@ -22,11 +22,11 @@ qua WebSocket `127.0.0.1:8788`. Tiến trình đó:
 - không thể được extension bật lên trực tiếp (trang extension không spawn được tiến trình).
 
 Nên có nút **▶ Start bridge** trong tab KB, đi vòng qua **Chrome native messaging** — đường
-duy nhất Chrome cho phép một extension chạm tới OS. Bước 4 bên dưới là cài cái cầu đó.
+duy nhất Chrome cho phép một extension chạm tới OS. Bước 3 bên dưới là cài cái cầu đó.
 Thiết kế đầy đủ nằm ở [KB-BRIDGE.md](KB-BRIDGE.md), không cần đọc để setup.
 
 Hệ quả cần biết trước: **ID của extension unpacked sinh theo đường dẫn thư mục nạp nó**.
-Chuyển repo sang chỗ khác là ID đổi, và phải chạy lại bước 4. Bộ cài tự dò ID, không phải
+Chuyển repo sang chỗ khác là ID đổi, và phải chạy lại bước 3. Bộ cài tự dò ID, không phải
 nhập tay.
 
 ---
@@ -44,7 +44,7 @@ Chưa có node thì cài trước (macOS: `brew install node`; Windows: winget/n
 `chrome://extensions` → bật **Developer mode** → **Load unpacked** → chọn **thư mục gốc
 repo** (thư mục chứa `manifest.json`).
 
-Agent không làm được bước này, và bước 4 **phụ thuộc vào nó**: bộ cài dò ID extension từ
+Agent không làm được bước này, và bước 3 **phụ thuộc vào nó**: bộ cài dò ID extension từ
 hồ sơ Chrome, chưa nạp thì chưa có gì để dò.
 
 ## Bước 2 — cài dependency
@@ -61,21 +61,7 @@ KB đã chú thích). Nếu mạng chặn phần tải trình duyệt:
 npx playwright install chromium
 ```
 
-## Bước 3 — Chrome Bridge phải được đăng ký
-
-KB job mượn url/token của Chrome Bridge để lái trình duyệt — xem
-[chrome-bridge-config.js](snap-bridge/chrome-bridge-config.js). Nó đọc `mcpServers.chrome`
-ở **top level** của `~/.claude.json`. Kiểm tra:
-
-```bash
-node -e "const c=require(require('os').homedir()+'/.claude.json');console.log(c.mcpServers&&c.mcpServers.chrome?'OK':'CHUA CO')"
-```
-
-Ra `CHUA CO` thì cài Chrome Bridge trước (trong Claude Code: `/ccchrome`), đăng ký ở
-`--scope user`. Bỏ qua bước này thì sáu tool `snap_*` vẫn chạy, nhưng **KB job sẽ không
-start được** — server nói thẳng điều đó trong log lúc khởi động.
-
-## Bước 4 — cài native messaging host
+## Bước 3 — cài native messaging host
 
 **macOS / Linux**
 
@@ -104,7 +90,7 @@ hiện trên `chrome://extensions`:
 # install.ps1 -ExtensionId <id>                              # Windows
 ```
 
-## Bước 5 — kiểm tra
+## Bước 4 — kiểm tra
 
 ```bash
 node snap-bridge/native-host/verify.mjs
@@ -125,7 +111,7 @@ Nó đi đúng chuỗi Chrome đi và bắt tay thật với shim đã cài (đ�
 `bridge chưa chạy` ở đây **không phải lỗi** — đó chính là việc của nút. Còn dòng `[LỖI]` nào
 thì sửa theo đúng câu nó nói rồi chạy lại; thoát khác 0 nghĩa là chưa đạt.
 
-## Bước 6 👤 — reload extension
+## Bước 5 👤 — reload extension
 
 `chrome://extensions` → nút reload trên thẻ Snap Studio.
 
@@ -133,7 +119,7 @@ thì sửa theo đúng câu nó nói rồi chạy lại; thoát khác 0 nghĩa l
 ([bridge-worker.js](src/bridge-worker.js)) cũng chỉ nạp code mới lúc đó. Bỏ qua bước này thì
 nút sẽ báo *"the extension's background worker didn't answer — reload Snap Studio"*.
 
-## Bước 7 👤 — bấm nút
+## Bước 6 👤 — bấm nút
 
 Mở Snap Studio → tab **KB**. Bridge chưa chạy thì đầu rail Articles có panel vàng
 *"snap-bridge isn't running"*. Bấm **▶ Start bridge** → khoảng một giây sau panel biến mất
@@ -161,11 +147,10 @@ khác sang.
 | Triệu chứng | Nguyên nhân | Cách sửa |
 |---|---|---|
 | Rail Articles trống, không có panel vàng | Bridge chạy nhưng `kb/` rỗng thật | Bình thường trên máy mới — tạo bài đầu tiên |
-| Panel vàng, bấm nút báo *"launcher isn't registered"* | Chưa làm bước 4 | Chạy bộ cài, rồi reload extension |
-| Bấm nút báo *"background worker didn't answer"* | Chưa reload sau khi cài | Bước 6 |
+| Panel vàng, bấm nút báo *"launcher isn't registered"* | Chưa làm bước 3 | Chạy bộ cài, rồi reload extension |
+| Bấm nút báo *"background worker didn't answer"* | Chưa reload sau khi cài | Bước 5 |
 | `verify` báo `id ... không khớp allowed_origins` | Repo đã đổi thư mục → ID đổi | Chạy lại bộ cài, reload extension |
 | `verify` báo lỗi ở dòng `bắt tay` | Đường dẫn node trong shim đã sai (gỡ/nâng cấp node, đổi nvm) | Chạy lại bộ cài |
-| Bridge lên nhưng KB job không start | Bước 3 chưa xong | Đăng ký Chrome Bridge `--scope user` |
 | Job chạy nhưng không xuất được ảnh | Thiếu Chromium của Playwright | `npx playwright install chromium` |
 
 Bridge chết giữa chừng vì bất kỳ lý do gì: rail tự hiện lại panel vàng, và tự nạp lại danh

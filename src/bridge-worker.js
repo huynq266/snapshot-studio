@@ -168,13 +168,23 @@ chrome.runtime.onMessage.addListener((msg) => {
  * denies any call whose tabId isn't in that snapshot. See KB-BRIDGE.md.
  * ------------------------------------------------------------------- */
 let kbSessionTabIds = new Set();
+// The Chrome tab GROUP the session's tabs sit in — purely visual bookkeeping
+// now, not a permission boundary (CHROME-BRIDGE-EXIT-PLAN.md removed the
+// permission one; nothing in kb-job.js's canUseTool reads this). It exists so
+// the tab strip itself answers "which tabs is the KB job using" at a glance,
+// distinct from whatever else the user has open and is navigating by hand.
+// null means "no group yet" — a fresh session, or the group Chrome already
+// dissolved because its last tab left it (Chrome drops an empty group on its
+// own; there is no explicit "delete group" call to make here).
+let kbSessionGroupId = null;
 
-chrome.storage.local.get('kbSessionTabIds').then((r) => {
+chrome.storage.local.get(['kbSessionTabIds', 'kbSessionGroupId']).then((r) => {
   if (Array.isArray(r.kbSessionTabIds)) kbSessionTabIds = new Set(r.kbSessionTabIds);
+  if (typeof r.kbSessionGroupId === 'number') kbSessionGroupId = r.kbSessionGroupId;
   pruneKbSession();
 });
 function saveKbSession() {
-  chrome.storage.local.set({ kbSessionTabIds: Array.from(kbSessionTabIds) });
+  chrome.storage.local.set({ kbSessionTabIds: Array.from(kbSessionTabIds), kbSessionGroupId });
 }
 async function pruneKbSession() {
   let changed = false;
@@ -196,156 +206,52 @@ async function listKbSessionTabs() {
       .map((t) => ({ id: t.id, title: t.title || t.url, url: t.url, inSession: kbSessionTabIds.has(t.id) })),
   };
 }
+
+/** Puts `tabId` in the session's own tab group, creating that group on the
+ *  first tab if none exists yet (or if the stored id has gone stale — the
+ *  group Chrome dissolved when its last tab left it). Title/colour are only
+ *  set on creation, not re-asserted per tab: chrome.tabs.group() into an
+ *  EXISTING groupId leaves its title/colour alone, so setting them once is
+ *  enough. Never throws past this point — a tab still gets added to
+ *  kbSessionTabIds even if the grouping itself fails for some reason (a
+ *  pinned tab, a policy-restricted one), since the visual grouping is a
+ *  nicety on top of the session list, not a precondition for using it. */
+async function groupIntoKbSession(tabId) {
+  if (kbSessionGroupId != null) {
+    try {
+      await chrome.tabs.group({ tabIds: tabId, groupId: kbSessionGroupId });
+      return;
+    } catch (e) {
+      // Stale — the group is gone (its last tab left it, or the window that
+      // held it closed). Fall through and mint a fresh one below.
+      kbSessionGroupId = null;
+    }
+  }
+  try {
+    kbSessionGroupId = await chrome.tabs.group({ tabIds: tabId });
+    try { await chrome.tabGroups.update(kbSessionGroupId, { title: 'KB job', color: 'cyan' }); } catch (e) {}
+  } catch (e) {
+    kbSessionGroupId = null; // pinned tab, or some other reason group() refused — session list still works without it
+  }
+}
+
 async function addKbSessionTab(tabId) {
   if (tabId == null) throw new Error('tabId is required');
   const tab = await chrome.tabs.get(tabId).catch(() => null);
   if (!tab || !capturable(tab.url)) throw new Error(`tab ${tabId} is not available to add`);
   kbSessionTabIds.add(tabId);
+  await groupIntoKbSession(tabId);
   saveKbSession();
   return listKbSessionTabs();
 }
 async function removeKbSessionTab(tabId) {
   kbSessionTabIds.delete(tabId);
+  // Best-effort — the tab may already be gone, or never grouped (pinned).
+  try { await chrome.tabs.ungroup(tabId); } catch (e) {}
   saveKbSession();
   return listKbSessionTabs();
 }
 
-
-/* -------------------------------------------------------------------
- * Adopting the KB session's tabs into a job's Chrome Bridge tab group.
- *
- * A job's mcp__chrome__* tools are hard-scoped by Chrome Bridge to "this
- * session's own tab group", which it creates fresh per session. The
- * 2026-08-28 entry in KB-BRIDGE.md concluded from that the user's real
- * tab could never be reached, and switched the job to re-opening the URL
- * in a tab of its own. That conclusion was about TIMING, not a missing
- * API: chrome.tabs.group() moves an already-open tab into an existing
- * group perfectly well — it just needs the group to exist, and when the
- * user presses Start it does not yet (Chrome drops an empty group, so
- * "Claude · 0041" is only a label until the session opens its first tab).
- *
- * So adoption runs one step later. The job navigates once, which is what
- * makes Chrome Bridge materialise the group; snap-bridge then calls
- * adopt_tabs with that tab's id, we read the group off it, and move the
- * session's tabs in. Chrome Bridge accepts them from then on like tabs it
- * opened itself, and the job works on the user's REAL tab — keeping the
- * scroll position, the open panel and the half-filled form that
- * re-opening the URL threw away and had to ask the instruction to
- * describe instead.
- *
- * Why the previous group is recorded rather than just ungrouping later —
- * the tab is the user's, twice over:
- *  - it visibly moves in the tab strip, so it has to move BACK when the
- *    job ends, into the group it came from if it had one;
- *  - Chrome Bridge tears its own group down, and a tab still in it can go
- *    with it. Closing someone's logged-in tab is a far worse failure than
- *    anything this feature buys.
- * The map is persisted for the same reason kbSessionTabIds is: an MV3
- * service worker is killed at will, and a forgotten entry here is a tab
- * stranded in a dead group.
- * ------------------------------------------------------------------- */
-
-// chrome.tabGroups.TAB_GROUP_ID_NONE, spelled out so this file needs no
-// "tabGroups" permission: chrome.tabs.group()/ungroup() and Tab.groupId are
-// all on the "tabs" API the manifest already asks for. Only the tabGroups
-// NAMESPACE (group titles, colours) would need more.
-const TAB_GROUP_ID_NONE = -1;
-
-/** tabId -> { groupId, windowId, index } as the tab was BEFORE adoption. */
-let adoptedTabs = new Map();
-
-chrome.storage.local.get('kbAdoptedTabs').then((r) => {
-  if (r.kbAdoptedTabs && typeof r.kbAdoptedTabs === 'object') {
-    adoptedTabs = new Map(Object.entries(r.kbAdoptedTabs).map(([k, v]) => [Number(k), v]));
-  }
-});
-function saveAdopted() {
-  chrome.storage.local.set({ kbAdoptedTabs: Object.fromEntries(adoptedTabs) });
-}
-chrome.tabs.onRemoved.addListener((tabId) => {
-  if (adoptedTabs.delete(tabId)) saveAdopted();
-});
-
-async function cmdAdoptTabs(args) {
-  const jobTabId = args && args.jobTabId;
-  if (typeof jobTabId !== 'number') throw new Error('jobTabId is required — the tab Chrome Bridge opened for this job.');
-  const jobTab = await chrome.tabs.get(jobTabId);
-  const groupId = jobTab.groupId;
-  if (groupId == null || groupId === TAB_GROUP_ID_NONE) {
-    throw new Error(`tab ${jobTabId} is not in a tab group, so there is nothing to adopt into — Chrome Bridge only materialises its group once it has opened a tab.`);
-  }
-  // A previous job that ended without releasing (worker killed mid-run, bridge
-  // dropped) would otherwise leave its tabs in a group nobody owns any more.
-  if (adoptedTabs.size) await cmdReleaseTabs({});
-  await pruneKbSession();
-  const requested = Array.isArray(args.tabIds) && args.tabIds.length ? args.tabIds : Array.from(kbSessionTabIds);
-  const adopted = [];
-  const skipped = [];
-  for (const id of requested) {
-    if (id === jobTabId) continue;
-    // Intersected with this extension's OWN session list rather than trusting
-    // the ids the bridge sent. They are the same ids in practice (bridge-kb.js
-    // snapshotted them from here), but this keeps "which tabs may be moved"
-    // answerable from the list the user actually clicked.
-    if (!kbSessionTabIds.has(id)) { skipped.push({ id, reason: 'not in the KB session tab list' }); continue; }
-    let tab;
-    try { tab = await chrome.tabs.get(id); } catch (e) { skipped.push({ id, reason: 'tab is gone' }); continue; }
-    if (tab.groupId === groupId) { adopted.push({ id, title: tab.title || tab.url, url: tab.url }); continue; }
-    // chrome.tabs.group() refuses a pinned tab, and unpinning one behind the
-    // user's back is not this feature's call to make.
-    if (tab.pinned) { skipped.push({ id, reason: 'tab is pinned — unpin it to use it in a job' }); continue; }
-    try {
-      if (!adoptedTabs.has(id)) adoptedTabs.set(id, { groupId: tab.groupId, windowId: tab.windowId, index: tab.index });
-      await chrome.tabs.group({ tabIds: id, groupId });
-      adopted.push({ id, title: tab.title || tab.url, url: tab.url });
-    } catch (e) {
-      adoptedTabs.delete(id);
-      skipped.push({ id, reason: String((e && e.message) || e) });
-    }
-  }
-  saveAdopted();
-  // The tab the job opened has done its only job: existing, so that Chrome
-  // Bridge had a group to hand us. Leaving it behind is what the user sees as
-  // "it still opens a new tab", and it is pure clutter once their own tabs are
-  // in the group — a tool call with no tabId falls back to any tab in the
-  // group, verified against a live session, so closing this one does not strand
-  // the job. Only when something was actually adopted: with nothing adopted it
-  // is the job's ONLY tab and closing it would end the run.
-  let jobTabClosed = false;
-  if (adopted.length) {
-    try { await chrome.tabs.remove(jobTabId); jobTabClosed = true; } catch (e) {}
-  }
-  return { groupId, adopted, skipped, jobTabClosed };
-}
-
-async function cmdReleaseTabs(args) {
-  const ids = Array.isArray(args && args.tabIds) && args.tabIds.length ? args.tabIds : Array.from(adoptedTabs.keys());
-  const released = [];
-  const failed = [];
-  for (const id of ids) {
-    const before = adoptedTabs.get(id);
-    if (!before) continue;
-    try { await chrome.tabs.get(id); } catch (e) { adoptedTabs.delete(id); continue; }
-    try {
-      if (before.groupId != null && before.groupId !== TAB_GROUP_ID_NONE) {
-        // Its old group can be gone by now (the user closed the last tab in
-        // it). Out of our group is still the right answer if so.
-        try { await chrome.tabs.group({ tabIds: id, groupId: before.groupId }); }
-        catch (e) { await chrome.tabs.ungroup(id); }
-      } else {
-        await chrome.tabs.ungroup(id);
-      }
-      released.push(id);
-      adoptedTabs.delete(id);
-    } catch (e) {
-      // Entry stays: the next release — or the next job's adopt, which clears
-      // stale ones first — gets another go at putting it back.
-      failed.push({ id, reason: String((e && e.message) || e) });
-    }
-  }
-  saveAdopted();
-  return { released, failed };
-}
 
 chrome.runtime.onMessage.addListener((msg) => {
   if (!msg || msg.type !== 'kb-session-cmd') return;
@@ -375,14 +281,17 @@ async function handleBridgeCommand(msg) {
     if (cmd === 'status') { replyBridge(reqId, true, await cmdStatus()); return; }
     if (cmd === 'get_accent') { replyBridge(reqId, true, await cmdGetAccent()); return; }
     if (cmd === 'capture_tab') { replyBridge(reqId, true, await cmdCaptureTab(args || {})); return; }
+    if (cmd === 'navigate') { replyBridge(reqId, true, await cmdNavigate(args || {})); return; }
+    if (cmd === 'new_tab') { replyBridge(reqId, true, await cmdNewTab(args || {})); return; }
+    if (cmd === 'list_tabs') { replyBridge(reqId, true, await listKbSessionTabs()); return; }
     if (cmd === 'open' || cmd === 'add' || cmd === 'export' || cmd === 'get_els') { replyBridge(reqId, true, await relayToEditor(cmd, args || {})); return; }
     if (cmd === 'frame_list') { replyBridge(reqId, true, await cmdFrameList(args || {})); return; }
     if (cmd === 'frame_scroll') { replyBridge(reqId, true, await cmdFrameScroll(args || {})); return; }
     if (cmd === 'frame_find') { replyBridge(reqId, true, await cmdFrameFind(args || {})); return; }
     if (cmd === 'frame_click') { replyBridge(reqId, true, await cmdFrameClick(args || {})); return; }
+    if (cmd === 'frame_fill') { replyBridge(reqId, true, await cmdFrameFill(args || {})); return; }
+    if (cmd === 'frame_press') { replyBridge(reqId, true, await cmdFramePress(args || {})); return; }
     if (cmd === 'frame_rect') { replyBridge(reqId, true, await cmdFrameRect(args || {})); return; }
-    if (cmd === 'adopt_tabs') { replyBridge(reqId, true, await cmdAdoptTabs(args || {})); return; }
-    if (cmd === 'release_tabs') { replyBridge(reqId, true, await cmdReleaseTabs(args || {})); return; }
     replyBridge(reqId, false, new Error(`unknown command "${cmd}"`));
   } catch (e) {
     replyBridge(reqId, false, e);
@@ -409,17 +318,82 @@ async function cmdGetAccent() {
   }
 }
 
+/** snap_navigate — CHROME-BRIDGE-EXIT-PLAN.md mục 5.1. No "current tab" concept:
+ *  tabId is required, on purpose — that is the whole point over
+ *  mcp__chrome__navigate, which falls back to "whichever tab is active in the
+ *  session's own group" the moment it is called without one. Waits on the
+ *  same waitTabComplete() every other tab-ready check in this file uses;
+ *  SPA content finishing render after that is a known gap (mục 8.1), not
+ *  something this function can see from here. */
+async function cmdNavigate({ tabId, url }) {
+  if (tabId == null) throw new Error('tabId is required — snap_navigate has no "current tab" to fall back to.');
+  if (!url) throw new Error('url is required');
+  try { await chrome.tabs.update(tabId, { url }); }
+  catch (e) { throw new Error(`could not navigate tab ${tabId}: ${e.message}`); }
+  await waitTabComplete(tabId);
+  const tab = await chrome.tabs.get(tabId);
+  return { tabId, url: tab.url || '', title: tab.title || '' };
+}
+
+/** snap_new_tab — the other half of closing topology A's gap left by dropping
+ *  mcp__chrome__* (CHROME-BRIDGE-EXIT-PLAN.md mục 12.3): topology B always
+ *  gets its tabs handed to it in the prompt, but a human typing /kb has to
+ *  find or open one itself, and mcp__snap__* had no equivalent to
+ *  mcp__chrome__new_tab/list_tabs until now. Plain chrome.tabs.create — no
+ *  group to join, no throwaway-tab bookkeeping, since nothing here scopes
+ *  tabs by group any more. */
+async function cmdNewTab({ url }) {
+  const tab = await chrome.tabs.create(url ? { url } : {});
+  if (url) await waitTabComplete(tab.id);
+  return { tabId: tab.id, url: tab.url || '', title: tab.title || '' };
+}
+
+/** Captures a tab's pixels over the DevTools Protocol instead of
+ *  chrome.tabs.captureVisibleTab — CDP reads straight off the tab's own
+ *  renderer, so unlike captureVisibleTab it does NOT require the tab to be
+ *  the active one of its window. Verified by hand (2026-09-03): two tabs
+ *  confirmed active:false via chrome.tabs still captured their real content
+ *  in full, not blank. (KB-BRIDGE.md's earlier "captureScreenshot came back
+ *  a blank white frame" note was one specific bug-reproduction case being
+ *  compared against captureVisibleTab, not a general background-tab
+ *  failure — worth a correction there.)
+ *
+ *  Attach is scoped to just this one capture (attach → shoot → detach)
+ *  rather than held open for the run of a job: Chrome shows a "this tab is
+ *  being debugged" infobar for exactly as long as chrome.debugger stays
+ *  attached, so keeping the window open only for the ~100-300ms a shot
+ *  takes is what keeps that banner to a flash instead of a fixture for the
+ *  whole job. Throws on anything going wrong — a chrome:// tab, or DevTools
+ *  already open on this one ("Another debugger is already attached") — so
+ *  the caller can fall back to the activate-based path instead of losing
+ *  the shot. */
+async function shootViaDebugger(tab) {
+  const target = { tabId: tab.id };
+  await chrome.debugger.attach(target, '1.3');
+  try {
+    const result = await chrome.debugger.sendCommand(target, 'Page.captureScreenshot', { format: 'png' });
+    if (!result || !result.data) throw new Error('Page.captureScreenshot returned no data');
+    return `data:image/png;base64,${result.data}`;
+  } finally {
+    try { await chrome.debugger.detach(target); } catch (e) {}
+  }
+}
+
 /** Resolves the tab to shoot, in order of precision: an exact tabId (e.g. the
  *  one mcp__chrome__navigate/list_tabs already returned — no guessing, and
  *  the only reliable choice once more than one tab could match a URL), then
  *  a URL substring match among open tabs, then — with neither given —
  *  resolveTarget()'s "active tab, or the last normal one seen" fallback,
- *  the same logic background.js's own toolbar capture path uses. The shot
- *  itself goes through shootQuietly() below rather than straight to
- *  shootVisibleTab(), and that is the whole difference between this and
- *  captureWholeTab(): the toolbar path runs because the user just clicked
- *  Snap and is watching it happen, while a KB job runs unattended for
- *  minutes and must not own the screen for all of them. */
+ *  the same logic background.js's own toolbar capture path uses.
+ *
+ *  A tabId/url target tries shootViaDebugger() first — no activation, no tab
+ *  flash at all — and only falls back to the old activate-then-restore path
+ *  (shootQuietly()) if CDP itself refuses (DevTools already attached, a
+ *  chrome:// page, whatever else). resolveTarget()'s fallback skips straight
+ *  to shootVisibleTab(): it has already activated its pick and focused that
+ *  window on purpose (the toolbar path runs because the user just clicked
+ *  Snap and is watching it happen), so there is nothing left to keep quiet
+ *  about and no reason to prefer CDP there. */
 async function cmdCaptureTab({ tabId, url }) {
   let tab;
   let quiet = true;
@@ -439,7 +413,13 @@ async function cmdCaptureTab({ tabId, url }) {
     tab = resolved;
     quiet = false;
   }
-  const dataUrl = quiet ? await shootQuietly(tab) : await shootVisibleTab(tab.windowId);
+  let dataUrl;
+  if (quiet) {
+    try { dataUrl = await shootViaDebugger(tab); }
+    catch (e) { dataUrl = await shootQuietly(tab); }
+  } else {
+    dataUrl = await shootVisibleTab(tab.windowId);
+  }
   // Re-read for the URL only — the tab may have settled a redirect while the
   // shot was being taken, and the caller writes this URL into the article.
   tab = await chrome.tabs.get(tab.id).catch(() => tab);
@@ -837,6 +817,57 @@ function pageClick({ selector }) {
   }
 }
 
+/** pageFill — CHROME-BRIDGE-EXIT-PLAN.md mục 5.2. Sets .value through the
+ *  ELEMENT PROTOTYPE's own setter, same trick pageClick's checkbox fallback
+ *  above uses: a framework that has patched an instance-level setter (React,
+ *  most component kits) would otherwise see its own setter called back with
+ *  the same value it already thinks .value holds, and skip re-rendering.
+ *  Also self-contained per the note above pageScroll — runs inside the
+ *  target frame via chrome.scripting.executeScript, no outer closures. */
+function pageFill({ selector, value }) {
+  try {
+    const el = document.querySelector(selector);
+    if (!el) return { ok: false, error: `no element matches "${selector}"` };
+    el.scrollIntoView({ block: 'center' });
+    const proto = el.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement.prototype
+      : el.tagName === 'SELECT' ? window.HTMLSelectElement.prototype
+      : window.HTMLInputElement.prototype;
+    const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
+    setter.call(el, value);
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    return { ok: true, value: el.value };
+  } catch (e) {
+    return { ok: false, error: String((e && e.message) || e) };
+  }
+}
+
+/** pagePress — CHROME-BRIDGE-EXIT-PLAN.md mục 5.3. Enough for Enter/Escape/
+ *  Tab, which is nearly the whole real need (typing a value belongs to
+ *  pageFill, not this). Targets `selector` if given, else whatever the frame
+ *  itself currently has focused — no synthetic focus() call, since forcing
+ *  focus onto an element the user/agent did not actually focus can itself
+ *  trigger a framework's onFocus side effects. Self-contained, same as
+ *  pageFill above. */
+function pagePress({ selector, key }) {
+  try {
+    let target = document.body;
+    if (selector) {
+      const el = document.querySelector(selector);
+      if (!el) return { ok: false, error: `no element matches "${selector}"` };
+      target = el;
+    } else if (document.activeElement) {
+      target = document.activeElement;
+    }
+    const opts = { key, bubbles: true, cancelable: true };
+    target.dispatchEvent(new KeyboardEvent('keydown', opts));
+    target.dispatchEvent(new KeyboardEvent('keyup', opts));
+    return { ok: true, key, target: target.tagName ? target.tagName.toLowerCase() : null };
+  } catch (e) {
+    return { ok: false, error: String((e && e.message) || e) };
+  }
+}
+
 /* ---------------------------------------------------------------------
  * Toạ độ: từ rect trong một frame → toạ độ pixel trên ảnh đã chụp.
  *
@@ -937,6 +968,18 @@ async function cmdFrameClick({ tabId, frameId, frameUrlContains, selector }) {
   if (tabId == null) throw new Error('tabId is required');
   const fid = await resolveFrameId(tabId, { frameId, frameUrlContains });
   return execInFrame(tabId, fid, pageClick, { selector });
+}
+
+async function cmdFrameFill({ tabId, frameId, frameUrlContains, selector, value }) {
+  if (tabId == null) throw new Error('tabId is required');
+  const fid = await resolveFrameId(tabId, { frameId, frameUrlContains });
+  return execInFrame(tabId, fid, pageFill, { selector, value });
+}
+
+async function cmdFramePress({ tabId, frameId, frameUrlContains, key, selector }) {
+  if (tabId == null) throw new Error('tabId is required');
+  const fid = await resolveFrameId(tabId, { frameId, frameUrlContains });
+  return execInFrame(tabId, fid, pagePress, { key, selector });
 }
 
 connectBridge();

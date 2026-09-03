@@ -73,7 +73,7 @@ Seam sạch: không có chỗ nào khác trong repo chạm tới Chrome Bridge.
 | `list_tabs` | Có | **bỏ** — job đã được cho sẵn danh sách tab trong prompt |
 | `switch_tab` | Có | **bỏ** — schema của chính nó nói không cần trước khi dùng tool khác |
 | `close_tab` | Có | **bỏ** — chỉ dùng cho tab tạm, mà tab tạm biến mất |
-| `resize_window` | Có | **hoãn** — thêm `snap_resize` chỉ khi thực tế cần chuẩn hoá bề ngang ảnh |
+| `resize_window` | Có | **bỏ** — không có bằng chứng dùng thật, `snap_export` đã headless (mục 12.1) |
 | `chrome_status` | Có | `snap_status` — **đã có** |
 | `new_tab` | — | đang bị chặn sẵn, bỏ luôn |
 
@@ -159,25 +159,191 @@ Phải đồng bộ trước khi bắt đầu GĐ 2.
 
 ## 9. Bốn giai đoạn, mỗi giai đoạn tự đứng được
 
-**GĐ 1 — Thêm bốn tool (thuần bổ sung, không đổi hành vi).**
+**GĐ 1 — Thêm bốn tool (thuần bổ sung, không đổi hành vi). ĐÃ XONG (2026-09-03).**
 `snap_navigate`, `snap_frame_fill`, `snap_frame_press`, `snap_look`. Chrome Bridge vẫn nguyên
-tại chỗ, job vẫn chạy như cũ. Test từng tool bằng tay trên tab thật.
-*Xong khi*: bốn tool chạy được trên trang Shopify thật, kể cả trong iframe nhúng.
+tại chỗ, job vẫn chạy như cũ — `kb-job.js` (topology B) chưa đụng tới, bốn tool mới chưa nằm
+trong `canUseTool`/`describeToolUse` của job spawn.
 
-**GĐ 2 — Lật công tắc.**
+Cài đặt: `src/bridge-worker.js` (`cmdNavigate`, `pageFill`+`cmdFrameFill`,
+`pagePress`+`cmdFramePress`, gắn vào `handleBridgeCommand`) và `snap-bridge/server.js` (4 tool
+MCP tương ứng; `snap_look` tái dùng thẳng `callExtension("capture_tab", …)` của
+`snap_capture_tab`, không thêm command mới ở tầng extension).
+
+Test tay: `node --check` sạch cả hai file; `npm test` (adopt-tabs, kb-playbook, kb-notes) vẫn
+xanh; gọi trực tiếp qua MCP client (bypass session bị cache "ConnectionRefused" từ lúc server
+chưa chạy) trên một tab Chrome thật của người dùng — **không phải Shopify** (không có sẵn tab
+Shopify đã đăng nhập lúc test), dùng `httpbin.org/forms/post` cho navigate/fill/press/look ở
+frame chính, và trang MDN `<input>` (nhiều iframe `*.mdnplay.dev`, khác hẳn origin
+`developer.mozilla.org`) cho phần quan trọng nhất — `snap_frame_fill`/`snap_frame_press` **bên
+trong iframe cross-origin thật**. Cả bốn tool chạy đúng; `snap_look` có một lần lỗi thoáng qua
+"image readback failed" (race điều kiện có sẵn của `chrome.tabs.captureVisibleTab`, không liên
+quan code mới) — retry qua ngay.
+
+Phát hiện đáng ghi: **extension không tự hot-reload** — sau khi sửa `bridge-worker.js` phải vào
+`chrome://extensions` bấm reload thủ công thì service worker mới nhận code mới; lần đầu test cả
+ba tool mới báo "unknown command" vì chạy code cũ.
+
+*Xong khi*: bốn tool chạy được trên trang Shopify thật, kể cả trong iframe nhúng — **đạt phần
+cơ chế** (cross-origin iframe thật, không phải Shopify cụ thể). Nên chạy lại một lượt trên đúng
+tab Shopify trước khi coi GĐ 1 đóng hẳn, vì SPA/Polaris có thể lộ ra thứ trang MDN không có.
+
+**GĐ 2 — Lật công tắc. ĐÃ XONG, NGHIỆM THU THẬT ĐÃ CHẠY (2026-09-03).**
 Bỏ `chrome` khỏi `mcpServers` của stage capture; `canUseTool` chuyển sang whitelist `tabId`
 theo `sessionTabs`; viết lại system prompt + `buildPrompt` (bỏ hết chuyện tab tạm/adopt); sửa
 SKILL.md. Job giờ **chỉ** dùng `snap_*`.
-*Xong khi*: một job KB thật dựng trọn bài, không mở tab nào mới, không dời tab nào.
 
-**GĐ 3 — Xoá tầng adopt.**
-Xoá theo danh sách mục 6. Chỉ làm sau khi GĐ 2 đã chạy thật xanh — đây là bước không quay lại
-rẻ được, và giữ nó lại một vòng không tốn gì.
+Cài đặt, tất cả trong `runCaptureStage` (`snap-bridge/kb-job.js`) trừ khi ghi khác:
+- `mcpServers`: chỉ còn `snapServer(snapSelf)` — bỏ hẳn khối `chrome: {...chromeCfg}`.
+- `canUseTool`: bỏ `CHROME_SAFE_TOOLS`/`new_tab`/`mcp__chrome__navigate` branch, bỏ
+  `jobTabId`/`adoptedTabIds`/`jobTabClosed`/`adoptPromise`/`startAdoption()`. Thay bằng một
+  whitelist phẳng: `sessionTabIds = new Set(sessionTabs.map(t => t.id))`, mọi tool trong
+  `SNAP_TAB_TOOLS` (đã thêm `snap_navigate`/`snap_look`/`snap_frame_fill`/`snap_frame_press`)
+  hoặc `snap_add` có `at.tabId` phải trúng tập đó; `snap_navigate` **thêm** một cổng origin độc
+  lập (`originAllowed(url)`, logic y hệt cổng cũ của `mcp__chrome__navigate`) — hai cổng
+  (tabId, origin) kiểm tra tách rời, không cổng nào miễn trừ cổng kia.
+- `startJob()`: bỏ `loadChromeBridgeConfig()`/`chromeCfg`/throw-nếu-thiếu-Bridge — một job giờ
+  khởi động được dù máy chưa từng cài Chrome Bridge. Bỏ import `chrome-bridge-config.js` khỏi
+  `kb-job.js` (file đó vẫn còn, GĐ 3 mới xoá — `server.js` vẫn import nó cho dòng log chẩn đoán
+  lúc khởi động, đã sửa lại chữ cho đúng: không còn nói "KB jobs will fail to start").
+- Comment đầu file `kb-job.js` và comment quanh khối `tabs: {adopt, release}` trong `server.js`
+  viết lại cho khớp thực tế — bản cũ mô tả đúng cơ chế adopt như thể vẫn đang chạy, để nguyên
+  là tài liệu nói dối. Khối `tabs`/`ctx.tabs`/`tabs.release()` trong `startJob()` **cố tình để
+  nguyên, không xoá** — giờ là no-op vô hại (không còn ai gọi `ctx.tabs.adopt`), xoá thật là
+  việc của GĐ 3 theo đúng mục 6.
+- `SKILL.md`: viết lại bullet topology B ở "Cần có trước" (không còn tab tạm/adopt, mọi tool
+  bắt buộc `tabId`, **không có cách mở tab mới** — nếu một tab không dùng được thì dừng lại và
+  báo, không còn đường lùi "navigate tab của job tới URL đó" như bản cũ); thêm 4 tool mới vào
+  bảng "Bộ tool"; mở rộng cảnh báo iframe cross-origin để nhắc cả `snap_frame_fill`/
+  `snap_frame_press` thay cho `mcp__chrome__fill`/`press_key`.
+- **Cố tình CHƯA làm** trong GĐ 2 này: hướng dẫn topology A (dòng 67 SKILL.md, "mcp__chrome__*
+  dùng để điều hướng") — mục 12.3 đã quyết bỏ Chrome Bridge cho cả topology A, nhưng làm ngay
+  sẽ lộ một lỗ chưa có lời giải: topology A không có sessionTabs được giao sẵn trong prompt như
+  topology B, nên nó cần một cách TỰ tìm tabId (`mcp__chrome__list_tabs`/`new_tab` hôm nay) mà
+  `mcp__snap__*` chưa có tool thay thế. Để nguyên, gắn cờ cho một lượt riêng.
 
-**GĐ 4 — Dọn tài liệu.**
+Test: `node --check` sạch `kb-job.js`/`server.js`; `npm test` — bộ cũ (adopt-tabs, kb-playbook,
+kb-notes) vẫn xanh, cộng bộ mới `capture-canusetool.test.mjs` (13 assertion, cùng khuôn vm+fake
+với `adopt-tabs.test.mjs`: slice `canUseTool` ra khỏi `kb-job.js` thật, chạy trong vm với
+`SNAP_TAB_TOOLS` đọc thật từ nguồn chứ không gõ tay lại) — phủ: tab trong session dùng được
+ngay lần gọi đầu (không cần navigate/adopt trước); tab ngoài session bị từ chối dù là tab
+Chrome thật; gọi thiếu tabId bị từ chối; `snap_navigate` đúng origin đi qua, sai origin bị chặn;
+đúng origin nhưng SAI tabId vẫn bị chặn (hai cổng độc lập); `snap_add` đọc tabId từ `at.tabId`
+đúng chỗ; `snap_add` không có `at` (toạ độ tay) không cần tabId; các role-gate cũ (chặn
+`snap_write_kb`/`snap_findings` ở capture stage) vẫn nguyên; **không** tool `mcp__chrome__*` nào
+còn lọt qua được nữa. Khởi động lại `snap-bridge` thật — boot sạch, dòng log chẩn đoán mới hiện
+đúng.
+
+**Nghiệm thu thật — ĐẠT (2026-09-03, ~10:01-10:48).** Người dùng tự chạy một job KB thật qua
+KB Studio ngay trong lúc đang review kế hoạch này: bài "How to translate Qikify Volume Discount
+app settings and offers" (`kb/translate-volume-discount-app`), 1 session tab, app Shopify thật
+với **iframe cross-origin thật** (Qikify Volume Discount). `job-log.json` cuối cùng:
+`status: "done"`, review round 1 verdict `"pass"`, không lỗi. Bằng chứng cụ thể từ log:
+- Không một dòng nào nhắc "adopt"/"tab tạm"/"mở đường" — agent dùng thẳng `tabId` của session
+  tab ngay từ lệnh đầu tiên, đúng `buildSystemPrompt` mới.
+- Hai lần agent gọi nhầm `mcp__chrome__click`/`mcp__chrome__list_tabs` (phản xạ cũ) và bị
+  `canUseTool` **từ chối đúng** ("Denied — ...: not something this job may do") — whitelist mới
+  hoạt động, agent tự phục hồi bằng `snap_navigate` ngay sau.
+- `snap_frame_list/find/click/scroll` dùng xuyên suốt để lái nội dung trong iframe cross-origin
+  — đúng bài toán gốc mục 2.1, không phải giả lập.
+- Dọn dẹp đúng luật skill (đóng modal Cancel, navigate về URL ban đầu); write + review stage
+  chạy trọn, review chỉ filed 2 nit không chặn (chọn component annotation, không liên quan gì
+  tới phần hạ tầng Chrome Bridge).
+- **Không mở tab mới, không dời tab nào** — đúng 1 tab session dùng suốt từ đầu tới cuối.
+
+*Xong khi*: một job KB thật dựng trọn bài, không mở tab nào mới, không dời tab nào — **✅ đạt**.
+
+**GĐ 3 — Xoá tầng adopt. ĐÃ XONG (2026-09-03).**
+Xoá đúng theo danh sách mục 6, ngay sau khi GĐ 2 chạy xanh thật (job
+`translate-volume-discount-app`) — không đợi "một vòng" như dự tính ban đầu, vì bằng chứng xanh
+đã có sẵn ngay trong phiên này.
+
+Đã xoá:
+- `snap-bridge/chrome-bridge-config.js` — cả file.
+- `snap-bridge/adopt-tabs.test.mjs` — cả file, và bỏ khỏi `npm test` trong `package.json`.
+- `src/bridge-worker.js`: `cmdAdoptTabs`, `cmdReleaseTabs`, `adoptedTabs`, `TAB_GROUP_ID_NONE`,
+  toàn bộ comment block "Adopting the KB session's tabs...", và 2 dòng dispatch
+  `adopt_tabs`/`release_tabs` trong `handleBridgeCommand`.
+- `snap-bridge/kb-job.js`: `CHROME_SAFE_TOOLS`, `extractTabId`, `pendingNavigateIds`, tham số
+  `onTabId` (ở `runStage`/`consumeStream`), 15 case `mcp__chrome__*` trong `describeToolUse`,
+  tham số `tabs` xuyên suốt `startJob`→`runAuthorPipeline`→`ctx`, khối `tabs.release()` cuối
+  `startJob`.
+- `snap-bridge/server.js`: khối `tabs: {adopt, release}` trong `kb_start`, import
+  `loadChromeBridgeConfig` và dòng log chẩn đoán Chrome Bridge lúc khởi động (file cung cấp nó
+  không còn tồn tại).
+
+Nhân tiện sửa hai chỗ tài liệu bị lỗi thời phát hiện trong lúc xoá (không nằm trong danh sách
+mục 6 nhưng để nguyên là nói dối): doc-comment của `startJob()` vẫn ghi "throws... if Chrome
+Bridge cannot be found" (đã không còn đúng từ GĐ 2), và một câu trong `CAPTURE_ROLE` dặn agent
+"navigate again first" ở fix round vì tưởng tab phiên trước "gone" — sai, tab session dùng được
+xuyên suốt các round bằng đúng `tabId`, không cần lập lại.
+
+Test: `node --check` sạch cả 3 file; `npm test` (`kb-playbook`, `kb-notes`,
+`capture-canusetool` — bộ `adopt-tabs` chết theo đúng dự tính) xanh; restart `snap-bridge` thật
+— boot sạch, không còn dòng log Chrome Bridge, extension reconnect bình thường.
+
+Rollback theo mục 11: từ đây trở đi, quay lại trạng thái trước GĐ 3 phải `revert` cả GĐ 2 lẫn
+GĐ 3 cùng lúc — không tách được nữa.
+
+**GĐ 4 — Dọn tài liệu. ĐÃ XONG (2026-09-03).**
 `KB-BRIDGE.md`: mục mới khép lại toàn bộ câu chuyện tab group, giữ lại lịch sử (đừng xoá —
 nó giải thích vì sao repo từng đi đường vòng). `SKILL.md`: bảng tool. `KB-SETUP.md`: bỏ bước
 cài Chrome Bridge.
+
+- `KB-BRIDGE.md`: thêm mục "Khép lại câu chuyện tab group — Chrome Bridge bỏ hẳn khỏi stage
+  capture (2026-09-03)", chèn ngay sau mục "Lật lại: job dùng ĐÚNG tab người dùng..."
+  (2026-09-02) — đúng chỗ câu chuyện adopt kết thúc. Tường thuật lại toàn bộ cung: bỏ tab thật
+  → agent tự mở tab riêng → dựng adopt hai pha → chạy thật xác nhận → GĐ 1-3 gỡ bỏ theo hướng
+  khác hẳn (bỏ Chrome Bridge khỏi phương trình thay vì lách quanh nó). Nêu rõ đánh đổi thật: mất
+  đường lùi "navigate tab của job" khi một session tab không dùng được — giờ job dừng và báo,
+  không còn tự chữa cháy. Không xoá mục 2026-08-28/2026-09-02 nào — giữ nguyên làm lịch sử.
+  Không đụng tới mục 3/4/6/7 (thiết kế/trial gốc, đã tự nhận là "chưa dựng"/lịch sử ở nơi khác
+  trong repo) — ngoài phạm vi GĐ 4, việc viết lại toàn bộ tài liệu thiết kế gốc không phải mục
+  tiêu của giai đoạn dọn dẹp này.
+- `SKILL.md` — mục "Bộ tool" đã đủ (thêm ở GĐ 2: 4 tool mới + mô tả); rà lại lần nữa không thấy
+  chỗ nào khác cần sửa cho GĐ 4 riêng.
+- `KB-SETUP.md`: xoá hẳn bước "Chrome Bridge phải được đăng ký" (bước 3 cũ) — KB job giờ khởi
+  động được không cần Chrome Bridge. Đánh số lại các bước sau (4→3, 5→4, 6→5, 7→6) và mọi chỗ
+  tham chiếu chéo số bước; bỏ dòng tương ứng trong bảng "Lỗi thường gặp". Số việc đánh dấu 👤
+  (con người phải tự làm) vẫn đúng "ba việc" như dòng mở đầu — không đổi.
+
+Test: đọc lại toàn bộ `KB-SETUP.md` sau khi đánh số lại, không còn tham chiếu số bước nào lệch;
+grep sạch — không còn "Chrome Bridge"/"sáu tool"/"bảy tool" nào sót trong file đó.
+
+**Topology A — khép nốt lỗ mục 12.3. ĐÃ XONG (2026-09-03).**
+Mục 12.3 liệt kê 4 tool topology A từng dùng (`navigate`, `click`, `fill`, `take_screenshot`) và
+map thẳng sang `snap_navigate`/`snap_frame_fill`/`snap_frame_press`/`snap_look` — nhưng bỏ sót
+một việc `mcp__chrome__*` vẫn đang âm thầm làm: **tìm tabId**. Topology A không có `sessionTabs`
+giao sẵn như topology B (mục GĐ 2, dòng "Cố tình CHƯA làm"); người gõ `/kb` tương tác phải tự
+`list_tabs` để biết đang có tab nào, hoặc `new_tab` khi cần mở tab mới — và `mcp__snap__*` tới
+GĐ 4 chưa có tool nào làm việc đó.
+
+Cài đặt:
+- `src/bridge-worker.js`: thêm `cmdNewTab({url})` (gọi `chrome.tabs.create`, đợi tab load xong
+  nếu có `url`) ngay sau `cmdNavigate`; dispatch `list_tabs`/`new_tab` trong
+  `handleBridgeCommand` — `list_tabs` tái dùng thẳng `listKbSessionTabs()` đã có sẵn (không viết
+  hàm mới), trả về **mọi** tab chụp được, không lọc theo group/session nào.
+- `snap-bridge/server.js`: thêm `snap_list_tabs` (không tham số) và `snap_new_tab` (tham số
+  `url` tuỳ chọn) ngay trước `snap_navigate`; sửa vài chỗ mô tả tool (`snap_look`,
+  `snap_capture_tab`, `snap_frame_list`) còn nhắc `mcp__chrome__navigate`/`list_tabs` làm nguồn
+  tabId — trỏ lại `snap_navigate`/`snap_new_tab`/`snap_list_tabs`.
+- `SKILL.md`: thêm bullet topology A riêng ở "Cần có trước" (dùng `snap_list_tabs` để biết tab
+  đang mở, `snap_new_tab` khi cần mở mới); thêm 2 dòng vào bảng "Bộ tool"; xoá hẳn câu cũ
+  `mcp__chrome__* dùng để điều hướng (...)`; viết lại "Quy trình" bước 2 — `snap_list_tabs`/
+  `snap_new_tab`/`snap_navigate` + `snap_frame_*` giờ là đường **chính**, không còn khung ⚠️ nói
+  đây là đường lùi khi `mcp__chrome__*` "âm thầm fail".
+
+Test: `node --check` sạch `server.js`/`bridge-worker.js`; `npm test` xanh; sau khi reload
+extension, gọi tay qua MCP client thật (không phải trang test — tab thật của người dùng đang
+mở): `snap_list_tabs` trả về đúng 4 tab thật đang mở (Crisp chat, hai trang quản trị Shopify,
+một video YouTube) — **không lọc theo group nào**, khác hẳn `mcp__chrome__list_tabs` cũ (chỉ
+thấy tab trong group riêng của Chrome Bridge); `snap_new_tab({url: "https://example.org"})` mở
+tab mới thành công, tab đó xuất hiện ngay ở lần `snap_list_tabs` kế tiếp; `snap_navigate` trên
+đúng tabId vừa mở hoạt động bình thường — xác nhận `snap_new_tab` trả về `tabId` dùng được ngay
+cho tool khác, không cần bước trung gian nào.
+
+*Xong khi*: topology A không còn tham chiếu `mcp__chrome__*` nào trong `SKILL.md`, và tab-
+discovery hoạt động trên tab thật của người dùng, không cần Chrome Bridge — **✅ đạt**. Mục
+12.3 giờ đã có tool thay thế đầy đủ; kế hoạch này không còn hạng mục nào bỏ ngỏ.
 
 ## 10. Test
 
@@ -193,11 +359,23 @@ cài Chrome Bridge.
 GĐ 1 thuần bổ sung → không cần rollback. GĐ 2 là một commit lật công tắc → `git revert` là về
 được, vì GĐ 3 (xoá) cố tình tách rời và làm sau. Sau GĐ 3 thì đường về là revert cả hai.
 
-## 12. Chưa quyết — cần người quyết
+## 12. Đã quyết (2026-09-03)
 
-1. **`snap_resize`**: có cần chuẩn hoá bề ngang cửa sổ trước khi chụp không? Hiện dùng
-   `mcp__chrome__resize_window` bao nhiêu lần trong thực tế? Nếu ~0 thì bỏ luôn.
-2. **`snap_frame_wait`**: làm ngay ở GĐ 1, hay chờ SPA cắn thật rồi mới thêm? Nghiêng về chờ —
-   thêm sớm là đoán mò hình dạng vấn đề.
-3. **Topology A có bỏ Chrome Bridge không**, hay chỉ topology B? Giữ cho topology A thì mất
-   cái lợi "một đường duy nhất", nhưng người ngồi máy vẫn có thể thích 22 tool của Bridge.
+1. **`snap_resize`: bỏ, không làm.** Grep toàn repo không thấy nơi nào ghi nhận
+   `resize_window` từng thực sự được gọi trong một job thật — chỉ có mặt trong whitelist
+   (được phép, chưa từng thấy dùng). Bằng chứng mạnh hơn: `snap_export` đã tự nhận "headless —
+   không phụ thuộc cỡ cửa sổ" (`SKILL.md` mục *Bộ tool*) — ảnh xuất bản cuối cùng vốn không
+   phụ thuộc kích thước cửa sổ lúc chụp. Không giữ trong GĐ 1, không thêm vào mục 5.
+2. **`snap_frame_wait`: hoãn**, đúng hướng nghiêng ban đầu. Đây là tool duy nhất trong nhóm
+   không có tiền lệ 1:1 với tool cũ — viết trước khi có ca lỗi thật là đoán hình dạng vấn đề.
+   Cách vá tạm (agent tự gọi `snap_frame_find` xác nhận trước khi chụp, xem mục 8.1) đủ cho
+   GĐ 1–2. Chỉ viết tool này khi GĐ 2 chạy thật và gặp ca SPA-race cụ thể.
+3. **Topology A: bỏ Chrome Bridge theo luôn**, dùng đúng bốn tool mới. `SKILL.md` mục *Bộ tool*
+   hiện tại cho thấy topology A (người gõ `/kb` tương tác) chỉ dùng 4 trong 22 tool của Chrome
+   Bridge — `navigate`, `click`, `fill`, `take_screenshot` (để nhìn) — và mục *Quy trình* bước 2
+   đã tự cảnh báo đúng triệu chứng iframe cross-origin. Lý do cốt lõi ở mục 2.1 (activeTab
+   không cấp quyền cho iframe cross-origin) áp dụng y hệt cho người ngồi gõ tương tác, không
+   riêng gì job spawn — cái topology A không dính là tầng tab-group/adopt (mục 2.2), vì nó
+   chưa từng đi qua `kb-job.js`. Đổi dòng `mcp__chrome__navigate/click/fill/take_screenshot`
+   trong `SKILL.md` sang `snap_navigate/snap_frame_fill/snap_frame_press/snap_look`, giữ đúng
+   lợi ích "một đường duy nhất" — không mất gì vì A chưa từng cần hơn 4 tool đó.
