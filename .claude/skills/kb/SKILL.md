@@ -124,7 +124,12 @@ khung**, phải `snap_frame_scroll` tới trước. (Playbook #2 — đây là l
   `snap_view({path, grid:true})` để **đọc** số thay vì ước lượng, và đọc playbook cho ngữ nghĩa
   `x/y` từng type (`zoom`/`step`/`label` là **tâm**, `textbox`/`highlight`/`blur` là **góc trên-trái**).
 - **Blur PII** (tên tài khoản, email, tên cửa hàng, tên khách) — đặt vào `job.globalEls` một lần
-  cho cả bài, không lặp lại từng bước; playbook #6.
+  cho cả bài, không lặp lại từng bước; playbook #6. Neo bằng `at:{selector}` khi target là một
+  element thật (chip tài khoản, v.v.) thay vì gõ tay `x/y/w/h` — sai một `globalEls` là sai trên
+  **mọi** ảnh cùng lúc. Đặt nó ngay ở **bước 1** và kiểm tra bằng mắt (mục 6) ngay lúc đó, đừng để
+  tới cuối bài mới thêm — thêm muộn nghĩa là các bước trước đó không còn được nhìn lại sau khi có
+  blur, và lần đầu tiên có ai nhìn thấy nó trên toàn bộ N ảnh là ở stage review, tốn hẳn một fix
+  round mới bắt được lỗi lẽ ra bắt ngay từ bước 1.
 - ≥1 `zoom` lên chi tiết quyết định — playbook #5.
 - **Đọc khối `WARNING:`** trong kết quả `snap_add`/`snap_job`/`snap_render_job`: tràn mép, callout
   đè lên vùng nó trỏ tới, đầu mũi tên nằm trong khung, prop không tồn tại. Không chặn render — nên
