@@ -178,10 +178,14 @@ let kbSessionTabIds = new Set();
 // own; there is no explicit "delete group" call to make here).
 let kbSessionGroupId = null;
 
-chrome.storage.local.get(['kbSessionTabIds', 'kbSessionGroupId']).then((r) => {
+chrome.storage.local.get(['kbSessionTabIds', 'kbSessionGroupId']).then(async (r) => {
   if (Array.isArray(r.kbSessionTabIds)) kbSessionTabIds = new Set(r.kbSessionTabIds);
   if (typeof r.kbSessionGroupId === 'number') kbSessionGroupId = r.kbSessionGroupId;
-  pruneKbSession();
+  await pruneKbSession();
+  // A service worker restart mid-job drops every chrome.debugger attachment
+  // (they don't survive it) — silently, so dialog auto-handling would just
+  // stop working on tabs that looked already set up. Re-attach explicitly.
+  for (const id of kbSessionTabIds) attachSessionDebugger(id);
 });
 function saveKbSession() {
   chrome.storage.local.set({ kbSessionTabIds: Array.from(kbSessionTabIds), kbSessionGroupId });
@@ -229,11 +233,61 @@ async function groupIntoKbSession(tabId) {
   }
   try {
     kbSessionGroupId = await chrome.tabs.group({ tabIds: tabId });
-    try { await chrome.tabGroups.update(kbSessionGroupId, { title: 'KB job', color: 'cyan' }); } catch (e) {}
+    // chrome.tabGroups.update only takes one of Chrome's 8 fixed group colors — no CSS var
+    // access from a service worker anyway. 'blue' is the closest match to tokens.css's
+    // --color-primary-500 / --accent (#1350de), so the group reads as "this app's color".
+    try { await chrome.tabGroups.update(kbSessionGroupId, { title: 'KB job', color: 'blue' }); } catch (e) {}
   } catch (e) {
     kbSessionGroupId = null; // pinned tab, or some other reason group() refused — session list still works without it
   }
 }
+
+/* ---------------------------------------------------------------------
+ * A debugger session held open for a session tab's whole time in the KB
+ * session — not attach-shoot-detach like shootViaDebugger() below — so
+ * Page.javascriptDialogOpening can be heard and auto-answered. A job with
+ * no human at the keyboard has no other way past a native alert/confirm/
+ * "Leave site?" prompt, which otherwise freezes that tab's whole JS thread
+ * for good (see KB-BRIDGE.md — the variant-swatches-volume job that got
+ * stuck exactly this way, a beforeunload guard firing off a navigate
+ * attempt). Cost: Chrome's "this tab is being debugged" infobar stays up
+ * on the tab for as long as it's in the session, not just a capture's
+ * ~100-300ms — accepted trade-off, see KB-BRIDGE.md.
+ * --------------------------------------------------------------------- */
+let debuggedSessionTabIds = new Set();
+
+async function attachSessionDebugger(tabId) {
+  if (debuggedSessionTabIds.has(tabId)) return;
+  try {
+    await chrome.debugger.attach({ tabId }, '1.3');
+    await chrome.debugger.sendCommand({ tabId }, 'Page.enable');
+    debuggedSessionTabIds.add(tabId);
+  } catch (e) {
+    // DevTools already open on this tab, a chrome:// page, whatever else —
+    // the session still works without dialog auto-handling on this one tab.
+  }
+}
+async function detachSessionDebugger(tabId) {
+  if (!debuggedSessionTabIds.delete(tabId)) return;
+  try { await chrome.debugger.detach({ tabId }); } catch (e) {}
+}
+// accept:true on every dialog type: for beforeunload that means "Leave" (the
+// case that actually happened), for alert/confirm/prompt it means "OK". The
+// unattended job has no way to read a dialog's text and decide, and a
+// dialog left open blocks the tab exactly as hard either way, so answering
+// it beats leaving it stuck.
+chrome.debugger.onEvent.addListener((source, method) => {
+  if (method !== 'Page.javascriptDialogOpening') return;
+  if (source.tabId == null || !debuggedSessionTabIds.has(source.tabId)) return;
+  chrome.debugger.sendCommand({ tabId: source.tabId }, 'Page.handleJavaScriptDialog', { accept: true }).catch(() => {});
+});
+// Chrome force-detaches (real DevTools opened on the tab, the tab crashed,
+// the window closed, ...) without going through detachSessionDebugger() —
+// keep the set honest so a later shootViaDebugger() on this tab doesn't
+// wrongly skip re-attaching.
+chrome.debugger.onDetach.addListener((source) => {
+  if (source.tabId != null) debuggedSessionTabIds.delete(source.tabId);
+});
 
 async function addKbSessionTab(tabId) {
   if (tabId == null) throw new Error('tabId is required');
@@ -241,6 +295,7 @@ async function addKbSessionTab(tabId) {
   if (!tab || !capturable(tab.url)) throw new Error(`tab ${tabId} is not available to add`);
   kbSessionTabIds.add(tabId);
   await groupIntoKbSession(tabId);
+  await attachSessionDebugger(tabId);
   saveKbSession();
   return listKbSessionTabs();
 }
@@ -248,6 +303,7 @@ async function removeKbSessionTab(tabId) {
   kbSessionTabIds.delete(tabId);
   // Best-effort — the tab may already be gone, or never grouped (pinned).
   try { await chrome.tabs.ungroup(tabId); } catch (e) {}
+  await detachSessionDebugger(tabId);
   saveKbSession();
   return listKbSessionTabs();
 }
@@ -363,19 +419,23 @@ async function cmdNewTab({ url }) {
  *  being debugged" infobar for exactly as long as chrome.debugger stays
  *  attached, so keeping the window open only for the ~100-300ms a shot
  *  takes is what keeps that banner to a flash instead of a fixture for the
- *  whole job. Throws on anything going wrong — a chrome:// tab, or DevTools
- *  already open on this one ("Another debugger is already attached") — so
- *  the caller can fall back to the activate-based path instead of losing
- *  the shot. */
+ *  whole job — UNLESS this tab already has attachSessionDebugger()'s longer-
+ *  lived session open (dialog auto-handling, above), in which case a second
+ *  attach() on the same target would just throw "Another debugger is
+ *  already attached"; reuse that session instead and skip attach/detach
+ *  here entirely. Throws on anything going wrong in the fresh-attach path —
+ *  a chrome:// tab, or DevTools already open on this one — so the caller
+ *  can fall back to the activate-based path instead of losing the shot. */
 async function shootViaDebugger(tab) {
   const target = { tabId: tab.id };
-  await chrome.debugger.attach(target, '1.3');
+  const reuseSession = debuggedSessionTabIds.has(tab.id);
+  if (!reuseSession) await chrome.debugger.attach(target, '1.3');
   try {
     const result = await chrome.debugger.sendCommand(target, 'Page.captureScreenshot', { format: 'png' });
     if (!result || !result.data) throw new Error('Page.captureScreenshot returned no data');
     return `data:image/png;base64,${result.data}`;
   } finally {
-    try { await chrome.debugger.detach(target); } catch (e) {}
+    if (!reuseSession) { try { await chrome.debugger.detach(target); } catch (e) {} }
   }
 }
 

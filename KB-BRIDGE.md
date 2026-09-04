@@ -546,7 +546,7 @@ tự mở/điều hướng trong lúc job chạy.
 
 **Cài đặt**: `groupIntoKbSession(tabId)` trong `src/bridge-worker.js`, gọi từ `addKbSessionTab()`
 mỗi khi người dùng bấm "+" trong KB Studio. Tab đầu tiên thêm vào session tạo group mới, đặt tên
-**"KB job"**, màu cyan (`chrome.tabGroups.update` — quyền `tabGroups` mới thêm vào
+**"KB job"**, màu xanh dương (`chrome.tabGroups.update` — quyền `tabGroups` mới thêm vào
 `manifest.json`); tab sau join đúng group đó qua `chrome.tabs.group({tabIds, groupId})`. Group
 cũ đã mất (Chrome tự dissolve group rỗng, không có API "xoá group" tường minh) thì tự phát hiện
 lỗi và tạo group mới. `removeKbSessionTab()` ungroup tab đó khi bỏ khỏi session. Không lỗi nào ở
@@ -557,7 +557,50 @@ lỗi và tạo group mới. `removeKbSessionTab()` ungroup tab đó khi bỏ kh
 cả — hoàn toàn là bookkeeping hiển thị, tách bạch khỏi whitelist `tabId` thật (GĐ 2).
 
 **Xác nhận bằng người dùng thật**: bấm "+" thêm tab trong KB Studio → group "KB job" màu cyan
-xuất hiện đúng như thiết kế.
+xuất hiện đúng như thiết kế. Sau đó đổi màu theo yêu cầu người dùng (2026-09-03): trước qua đỏ,
+rồi chốt lại thành xanh dương (`'blue'`) để ăn theo `--color-primary-500`/`--accent` của
+`tokens.css` (`#1350de`) — enum màu group của Chrome cố định 8 giá trị, không đọc được CSS
+variable từ service worker, nên đây là màu enum khớp nhất chứ không phải giá trị chính xác. Chỉ
+đổi giá trị `color`, không đổi cơ chế.
+
+### Job kẹt vì dialog gốc của trình duyệt — CDP tự trả lời (2026-09-03)
+
+**Sự cố thật**: job `variant-swatches-volume` (bài "How to customize variant swatches in Qikify
+Volume Discount") — capture stage gọi `snap_navigate` trong lúc trang còn báo unsaved changes,
+Shopify bật `beforeunload` guard, trình duyệt bật hộp thoại gốc "Leave site?". Không tool nào của
+job tắt được — dialog gốc chặn đứng toàn bộ JS thread của tab, `snap_look`/`snap_capture_tab`/
+`snap_navigate` trên tab đó đều đứng im. Agent tự viết báo cáo, nhờ người dùng bấm tay vào tab để
+gỡ dialog rồi mới đi tiếp — job vẫn xong (write/review chạy trên `job.json` đã có, không cần tab
+đó nữa), nhưng đây là đúng kiểu lỗ hổng "job không ai ngồi cạnh" không được phép có.
+
+**Cơ chế**: CDP có `Page.javascriptDialogOpening` (bắn ra khi `alert`/`confirm`/`prompt`/
+`beforeunload` xuất hiện) và `Page.handleJavaScriptDialog({accept})` để trả lời nó — đúng cơ chế
+Puppeteer/Playwright dùng để không bao giờ bị kẹt dialog. Nhưng nghe được event này cần
+`Page.enable`, và cần debugger **đang attach** tại đúng lúc dialog nổi lên — không có cách nào
+"bắt lại" một dialog đã lỡ xuất hiện trước khi attach.
+
+**Cài đặt**: `attachSessionDebugger(tabId)`/`detachSessionDebugger(tabId)` trong
+`src/bridge-worker.js`, gọi từ `addKbSessionTab()`/`removeKbSessionTab()` — khác hẳn
+`shootViaDebugger()` (mục "Nháy tab lúc chụp" ở trên) vốn attach-chụp-detach trong ~100-300ms,
+debugger session này **giữ mở suốt lúc tab còn trong KB session**, chỉ để nghe
+`Page.javascriptDialogOpening` và tự gọi `handleJavaScriptDialog({accept: true})` — `accept:true`
+nghĩa là "Leave"/"OK" cho mọi loại dialog, vì job không đọc được nội dung dialog để quyết định, và
+một dialog bị bỏ mặc chặn tab y hệt bất kể loại nào. `chrome.debugger.onDetach` giữ
+`debuggedSessionTabIds` đúng thực tế khi Chrome tự ngắt (DevTools thật mở trên tab đó, tab
+crash…); lúc service worker restart giữa job, danh sách session tab được nạp lại từ
+`chrome.storage.local` cũng tự động attach lại — không thì tính năng âm thầm ngừng hoạt động mà
+không ai biết.
+
+**Đụng `shootViaDebugger()`**: một tab chỉ attach được MỘT debugger session cùng lúc — nếu tab đã
+có session dài hạn ở trên, `shootViaDebugger()` gọi `chrome.debugger.attach()` lần nữa sẽ ăn lỗi
+"Another debugger is already attached". Sửa: `shootViaDebugger()` kiểm tra
+`debuggedSessionTabIds.has(tab.id)` trước — có thì dùng thẳng session đã mở (không attach/detach
+gì thêm), không thì giữ nguyên hành vi attach-chụp-detach cũ cho tab ngoài session.
+
+**Đánh đổi đã chọn có cân nhắc** (người dùng đồng ý trước khi làm): banner "this tab is being
+debugged" của Chrome giờ hiện **suốt** lúc tab còn trong KB session, không còn là một cái nháy
+~100-300ms như lúc chỉ dùng cho chụp ảnh. Đổi lại: job không còn cách nào bị treo cứng vì một
+dialog gốc không ai bấm giúp.
 
 ### Cửa sổ Windows Terminal nhảy lên mỗi lần render (2026-08-30)
 
